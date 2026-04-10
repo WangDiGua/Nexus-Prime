@@ -21,7 +21,7 @@ export const useRegistryStore = create<RegistryState>((set) => ({
   config: {
     name: 'Nexus-Prime',
     version: 'v2.1.0',
-    model: 'gemini-3-flash-preview'
+    model: 'qwen-plus-latest'
   },
   contextTokens: 1240,
   contextContent: {

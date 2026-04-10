@@ -6,13 +6,11 @@ import {
   Sparkles, 
   Bot, 
   Zap,
-  Loader2,
   Mail,
   BarChart3,
   Globe,
   Database
 } from 'lucide-react';
-import { GoogleGenAI, Type, FunctionDeclaration } from "@google/genai";
 import ChatMessage from '@/components/chat/ChatMessage';
 import { cn } from '@/lib/utils';
 import { useRegistryStore } from '@/hooks/use-registry-store';
@@ -35,41 +33,6 @@ export default function NexusChat() {
   
   const scrollRef = useRef<HTMLDivElement>(null);
 
-  // 初始化 Gemini AI
-  const ai = new GoogleGenAI({ 
-    apiKey: process.env.NEXT_PUBLIC_GEMINI_API_KEY || '' 
-  });
-
-  // 定义工具
-  const queryDatabaseTool: FunctionDeclaration = {
-    name: "query_database",
-    parameters: {
-      type: Type.OBJECT,
-      description: "查询远程数据库以获取用户信息",
-      properties: {
-        table: { type: Type.STRING, description: "要查询的表名" },
-        query: { type: Type.STRING, description: "查询条件" },
-      },
-      required: ["table", "query"],
-    },
-  };
-
-  const sendEmailTool: FunctionDeclaration = {
-    name: "send_email",
-    parameters: {
-      type: Type.OBJECT,
-      description: "发送电子邮件",
-      properties: {
-        to: { type: Type.STRING, description: "收件人邮箱" },
-        subject: { type: Type.STRING, description: "邮件主题" },
-        body: { type: Type.STRING, description: "邮件内容" },
-      },
-      required: ["to", "subject", "body"],
-    },
-  };
-
-  const tools = [{ functionDeclarations: [queryDatabaseTool, sendEmailTool] }];
-
   useEffect(() => {
     if (scrollRef.current) {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
@@ -91,32 +54,55 @@ export default function NexusChat() {
     setIsLoading(true);
 
     try {
-      const history = messages.map(msg => ({
-        role: msg.role === 'user' ? 'user' : 'model',
-        parts: [{ text: msg.content }]
-      }));
-
-      const response = await ai.models.generateContent({
-        model: "gemini-3-flash-preview",
-        contents: [...history, { role: 'user', parts: [{ text: input }] }],
-        config: {
-          systemInstruction: `你是一个名为 Nexus-Prime 的高级 AI 助手。
-          你拥有访问远程能力（Skills）和 MCP 服务器的权限。
-          当用户要求执行特定任务时，优先考虑使用工具。
-          在调用工具前，请简要说明你的思考过程。`,
-          tools,
-        },
+      const apiRes = await fetch('/api/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          messages: [
+            ...messages.map((msg) => ({
+              role: msg.role,
+              content: msg.content,
+            })),
+            { role: 'user', content: input },
+          ],
+        }),
       });
+
+      const rawBody = await apiRes.text();
+      let payload: Record<string, unknown>;
+      try {
+        payload = rawBody ? (JSON.parse(rawBody) as Record<string, unknown>) : {};
+      } catch {
+        throw new Error(
+          `接口返回非 JSON（HTTP ${apiRes.status}）：${rawBody.slice(0, 400)}`
+        );
+      }
+
+      if (!apiRes.ok) {
+        const err = payload.error;
+        const msg =
+          typeof err === 'string'
+            ? err
+            : err && typeof err === 'object' && 'message' in err && typeof (err as { message: unknown }).message === 'string'
+              ? String((err as { message: string }).message)
+              : JSON.stringify(err ?? payload);
+        throw new Error(`请求失败（${apiRes.status}）：${msg}`);
+      }
+
+      const { text, functionCalls } = payload as {
+        text?: string;
+        functionCalls?: { id: string; name: string; args: Record<string, unknown> }[];
+      };
 
       let assistantMessage: Message = {
         id: Math.random().toString(36).substring(7),
         role: 'assistant',
-        content: response.text || ''
+        content: text || '',
       };
 
-      if (response.functionCalls) {
+      if (functionCalls?.length) {
         const toolInvocations = [];
-        for (const call of response.functionCalls) {
+        for (const call of functionCalls) {
           const toolCallId = call.id || Math.random().toString(36).substring(7);
           
           addPacket({
@@ -146,7 +132,7 @@ export default function NexusChat() {
               icon: 'Database',
               endpoint: 'https://api.lantu.com/v1/db/query',
               description: '内部数据库访问接口'
-            }, call.args);
+            }, call.args as Record<string, string>);
           } else if (call.name === 'send_email') {
             result = await registryClient.remoteInvoke({
               id: 'skill-email',
@@ -155,7 +141,7 @@ export default function NexusChat() {
               icon: 'Mail',
               endpoint: 'https://api.lantu.com/v1/email',
               description: 'SMTP 邮件发送服务'
-            }, call.args);
+            }, call.args as Record<string, string>);
           }
 
           toolInvocations[toolInvocations.length - 1] = {
@@ -174,11 +160,12 @@ export default function NexusChat() {
       );
 
     } catch (error) {
-      console.error('Gemini Error:', error);
+      console.error('Chat API Error:', error);
+      const detail = error instanceof Error ? error.message : String(error);
       setMessages(prev => [...prev, {
         id: Math.random().toString(36).substring(7),
         role: 'assistant',
-        content: '抱歉，处理您的请求时出现了错误。请检查 API 密钥配置。'
+        content: `请求出错：${detail}\n\n请确认服务端已配置 DASHSCOPE_API_KEY、DASHSCOPE_BASE_URL（开发环境可用 .env.local），并与百炼控制台地域、模型开通情况一致。`
       }]);
     } finally {
       setIsLoading(false);
@@ -204,7 +191,7 @@ export default function NexusChat() {
             <h1 className="text-base font-semibold tracking-tight text-foreground">Nexus-Prime</h1>
             <div className="flex items-center gap-1.5">
               <div className="w-1.5 h-1.5 rounded-full bg-ios-green animate-status-pulse" />
-              <span className="text-[10px] font-medium text-muted-foreground uppercase tracking-wider">在线 • gemini-3-flash-preview</span>
+              <span className="text-[10px] font-medium text-muted-foreground uppercase tracking-wider">在线 • {config.model}</span>
             </div>
           </div>
         </div>
@@ -303,7 +290,7 @@ export default function NexusChat() {
         <div className="flex items-center justify-center gap-2 mt-4 opacity-40">
           <Sparkles size={12} className="text-primary" />
           <p className="text-[10px] font-bold uppercase tracking-[0.2em]">
-            Powered by Gemini 3 Flash
+            Powered by DashScope
           </p>
         </div>
       </div>
