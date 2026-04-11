@@ -67,7 +67,8 @@ model Message {
   content        String
   toolCalls      Json?    @map("tool_calls")
   toolResults    Json?    @map("tool_results")
-  thinkingLog    Json?    @map("thinking_log")
+  thinkingLog              Json?    @map("thinking_log")
+  thinkingStepDurationsMs  Json?    @map("thinking_step_durations_ms")
   tokensUsed     Int      @default(0) @map("tokens_used")
   latencyMs      Int      @default(0) @map("latency_ms")
   model          String?  @db.VarChar(100)

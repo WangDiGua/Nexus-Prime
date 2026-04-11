@@ -11,6 +11,7 @@ export interface CreateMessageData {
   toolCalls?: Record<string, unknown>;
   toolResults?: Record<string, unknown>;
   thinkingLog?: Record<string, unknown>;
+  thinkingStepDurationsMs?: number[];
   tokensUsed?: number;
   latencyMs?: number;
   model?: string;
@@ -62,6 +63,9 @@ export class MessageService {
         toolCalls: toJson(data.toolCalls),
         toolResults: toJson(data.toolResults),
         thinkingLog: toJson(data.thinkingLog),
+        thinkingStepDurationsMs: data.thinkingStepDurationsMs
+          ? (data.thinkingStepDurationsMs as Prisma.InputJsonValue)
+          : undefined,
         tokensUsed: data.tokensUsed || 0,
         latencyMs: data.latencyMs || 0,
         model: data.model,
@@ -145,6 +149,9 @@ export class MessageService {
         toolCalls: toJson(data.toolCalls),
         toolResults: toJson(data.toolResults),
         thinkingLog: toJson(data.thinkingLog),
+        thinkingStepDurationsMs: data.thinkingStepDurationsMs
+          ? (data.thinkingStepDurationsMs as Prisma.InputJsonValue)
+          : undefined,
         tokensUsed: data.tokensUsed,
         latencyMs: data.latencyMs,
       },

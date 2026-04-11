@@ -33,6 +33,7 @@ export interface ConversationWithMessages {
     toolCalls: Record<string, unknown> | null;
     toolResults: Record<string, unknown> | null;
     thinkingLog: Record<string, unknown> | null;
+    thinkingStepDurationsMs: unknown;
     tokensUsed: number;
     latencyMs: number;
   }>;
@@ -76,6 +77,7 @@ export class ConversationService {
                 toolCalls: true,
                 toolResults: true,
                 thinkingLog: true,
+                thinkingStepDurationsMs: true,
                 tokensUsed: true,
                 latencyMs: true,
               },

@@ -6,8 +6,6 @@ const PUBLIC_PATHS = [
   '/api/health',
   '/api/tools',
   '/api/resources',
-  '/login',
-  '/register',
 ];
 
 const STATIC_PATHS = [
@@ -24,7 +22,7 @@ function isPublicPath(pathname: string): boolean {
   if (STATIC_PATHS.some((p) => pathname.startsWith(p))) {
     return true;
   }
-  if (pathname === '/') {
+  if (pathname === '/' || pathname === '/chat') {
     return true;
   }
   return false;
@@ -34,7 +32,7 @@ function parseJwt(token: string): any {
   try {
     const parts = token.split('.');
     if (parts.length !== 3) return null;
-    
+
     const payload = parts[1];
     const decoded = atob(payload.replace(/-/g, '+').replace(/_/g, '/'));
     return JSON.parse(decoded);
@@ -51,15 +49,19 @@ function isTokenExpired(payload: any): boolean {
 export async function middleware(request: NextRequest) {
   const { pathname } = request.nextUrl;
 
+  if (pathname === '/login') {
+    return NextResponse.redirect(new URL('/chat', request.url));
+  }
+
+  if (pathname === '/register') {
+    return NextResponse.redirect(new URL('/chat?register=1', request.url));
+  }
+
   if (isPublicPath(pathname)) {
     return NextResponse.next();
   }
 
   const token = request.cookies.get('auth_token')?.value;
-
-  console.log('[Middleware] Path:', pathname);
-  console.log('[Middleware] All cookies:', request.cookies.getAll().map(c => c.name));
-  console.log('[Middleware] Token exists:', !!token);
 
   if (!token) {
     if (pathname.startsWith('/api/')) {
@@ -68,9 +70,7 @@ export async function middleware(request: NextRequest) {
         { status: 401 }
       );
     }
-    const loginUrl = new URL('/login', request.url);
-    loginUrl.searchParams.set('redirect', pathname);
-    return NextResponse.redirect(loginUrl);
+    return NextResponse.redirect(new URL('/chat', request.url));
   }
 
   const payload = parseJwt(token);
@@ -82,9 +82,7 @@ export async function middleware(request: NextRequest) {
         { status: 401 }
       );
     }
-    const loginUrl = new URL('/login', request.url);
-    loginUrl.searchParams.set('redirect', pathname);
-    const response = NextResponse.redirect(loginUrl);
+    const response = NextResponse.redirect(new URL('/chat', request.url));
     response.cookies.delete('auth_token');
     response.cookies.delete('refresh_token');
     return response;

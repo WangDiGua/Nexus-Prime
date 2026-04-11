@@ -1,9 +1,10 @@
-import type { Metadata } from 'next';
-import { Inter, JetBrains_Mono, Geist } from 'next/font/google';
+import type { Metadata, Viewport } from 'next';
+import { Inter, JetBrains_Mono } from 'next/font/google';
+import Script from 'next/script';
 import './globals.css';
 import { Providers } from '@/components/Providers';
-import { ThemeScript } from '@/components/ThemeScript';
 import { cn } from "@/lib/utils";
+import { THEME_BOOT_SCRIPT } from '@/lib/theme-resolve';
 
 const inter = Inter({ subsets: ['latin'], variable: '--font-sans' });
 
@@ -17,14 +18,22 @@ export const metadata: Metadata = {
   description: 'Production-grade AI Agent testing and orchestration portal.',
 };
 
+export const viewport: Viewport = {
+  width: 'device-width',
+  initialScale: 1,
+  viewportFit: 'cover',
+};
+
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
     <html lang="zh-CN" className={cn(jetbrainsMono.variable, inter.variable)} suppressHydrationWarning>
       <body className="antialiased" suppressHydrationWarning>
-        <Providers>
-          <ThemeScript />
-          {children}
-        </Providers>
+        <Script
+          id="nexus-theme-boot"
+          strategy="beforeInteractive"
+          dangerouslySetInnerHTML={{ __html: THEME_BOOT_SCRIPT }}
+        />
+        <Providers>{children}</Providers>
       </body>
     </html>
   );

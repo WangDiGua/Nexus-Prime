@@ -1,19 +1,27 @@
 import * as React from "react"
 
-const MOBILE_BREAKPOINT = 768
+/** 与 Tailwind `md` 对齐：&lt; md 视为移动端布局 */
+export const MOBILE_BREAKPOINT = 768
+
+function subscribeMobile(cb: () => void) {
+  const mql = window.matchMedia(`(max-width: ${MOBILE_BREAKPOINT - 1}px)`)
+  mql.addEventListener("change", cb)
+  return () => mql.removeEventListener("change", cb)
+}
+
+function getMobileSnapshot() {
+  return window.innerWidth < MOBILE_BREAKPOINT
+}
+
+/** SSR 与首帧与桌面布局一致，避免 hydration 报错 */
+function getMobileServerSnapshot() {
+  return false
+}
 
 export function useIsMobile() {
-  const [isMobile, setIsMobile] = React.useState<boolean | undefined>(undefined)
-
-  React.useEffect(() => {
-    const mql = window.matchMedia(`(max-width: ${MOBILE_BREAKPOINT - 1}px)`)
-    const onChange = () => {
-      setIsMobile(window.innerWidth < MOBILE_BREAKPOINT)
-    }
-    mql.addEventListener("change", onChange)
-    setIsMobile(window.innerWidth < MOBILE_BREAKPOINT)
-    return () => mql.removeEventListener("change", onChange)
-  }, [])
-
-  return !!isMobile
+  return React.useSyncExternalStore(
+    subscribeMobile,
+    getMobileSnapshot,
+    getMobileServerSnapshot
+  )
 }

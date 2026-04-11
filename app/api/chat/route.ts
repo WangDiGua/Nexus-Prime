@@ -231,6 +231,17 @@ export async function POST(req: NextRequest) {
 
 **关键：工具参数值必须是纯文本，不要使用任何 Markdown 格式！**
 
+## 回复中的图表（可选）
+
+需要**折线图/柱状图**时，使用 \`\`\`chart 代码块，内容为**单行或多行 JSON**（合法 JSON 即可），字段：
+- \`type\`: \`"line"\` 或 \`"bar"\`
+- \`data\`: 对象数组，每项必须包含 \`xKey\` 对应字段及各 \`series.key\` 数值字段（数字）
+- \`xKey\`: 横轴类别字段名
+- \`series\`: \`[{ "key": "数值列名", "name": "图例名（可选）" }]\`，最多 8 条序列
+- \`height\`: 可选，图表高度（像素，160–520）
+
+需要流程图/时序图等可用 \`\`\`mermaid 代码块。
+
 ## 对话风格
 
 1. 保持友好、自然的对话风格
@@ -286,7 +297,7 @@ export async function POST(req: NextRequest) {
       await writer.write(
         encoder.encode(encodeSSE({
           type: 'thinking',
-          content: `🔄 ReAct 模式启动，已加载 ${tools.length} 个远程工具`,
+          content: `ReAct 模式启动，已加载 ${tools.length} 个远程工具`,
         }))
       );
 
@@ -297,7 +308,7 @@ export async function POST(req: NextRequest) {
         await writer.write(
           encoder.encode(encodeSSE({
             type: 'thinking',
-            content: `💭 第 ${iteration} 轮思考中...`,
+            content: `第 ${iteration} 轮思考中…`,
           }))
         );
 
@@ -322,7 +333,7 @@ export async function POST(req: NextRequest) {
           await writer.write(
             encoder.encode(encodeSSE({
               type: 'thinking',
-              content: '✅ 思考完成',
+              content: '思考完成',
             }))
           );
           await writer.write(encoder.encode(encodeSSE({ type: 'done' })));
@@ -332,7 +343,7 @@ export async function POST(req: NextRequest) {
         await writer.write(
           encoder.encode(encodeSSE({
             type: 'thinking',
-            content: `🔧 调用 ${llmResponse.toolCalls.length} 个工具`,
+            content: `调用 ${llmResponse.toolCalls.length} 个工具`,
           }))
         );
 

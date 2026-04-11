@@ -1,9 +1,8 @@
 'use client';
 
-import { User, Bot } from 'lucide-react';
-import ReactMarkdown from 'react-markdown';
+import { Copy, RotateCcw } from 'lucide-react';
 import { cn } from '@/lib/utils';
-import ToolCard from './ToolCard';
+import { MarkdownContent } from '@/components/chat/MarkdownContent';
 import type { ToolResult } from '@/types/chat';
 
 interface Message {
@@ -21,70 +20,101 @@ interface Message {
 
 interface ChatMessageProps {
   message: Message;
+  /** 仅助手消息：底部操作 */
+  onCopyAssistant?: () => void;
+  onRegenerate?: () => void;
+  regenerateDisabled?: boolean;
 }
 
-export default function ChatMessage({ message }: ChatMessageProps) {
+export default function ChatMessage({
+  message,
+  onCopyAssistant,
+  onRegenerate,
+  regenerateDisabled,
+}: ChatMessageProps) {
   const isUser = message.role === 'user';
+  const showAssistantActions =
+    !isUser && (onCopyAssistant || onRegenerate);
 
   return (
-    <div className={cn(
-      "flex gap-3 max-w-3xl mx-auto w-full animate-ios-fade-in",
-      isUser ? "flex-row-reverse" : "flex-row"
-    )}>
-      {!isUser && (
-        <div className="w-8 h-8 rounded-full bg-primary/10 text-primary flex items-center justify-center shrink-0 border border-primary/20">
-          <Bot size={16} />
-        </div>
+    <div
+      className={cn(
+        'mx-auto flex w-full max-w-3xl animate-ios-fade-in',
+        isUser ? 'flex-row-reverse justify-end' : 'flex-row'
       )}
-
-      <div className={cn(
-        "flex flex-col gap-1.5 flex-1",
-        isUser ? "items-end" : "items-start"
-      )}>
-        {message.toolInvocations?.map((toolInvocation) => {
-          const { toolName, toolCallId, state, result } = toolInvocation;
-
-          if (state === 'result' && result) {
-            return (
-              <div key={toolCallId} className="w-full mt-2">
-                <ToolCard
-                  toolName={toolName}
-                  args={toolInvocation.args}
-                  status={result.status === 'success' ? 'success' : 'error'}
-                  result={result.result}
-                  latency={`${result.latency || 0}ms`}
-                  endpoint={`/invoke/${toolName}`}
-                  error={result.error}
-                />
-              </div>
-            );
-          }
-
-          return (
-            <div key={toolCallId} className="w-full mt-2">
-              <ToolCard
-                toolName={toolName}
-                args={toolInvocation.args}
-                status="calling"
-                endpoint={`/invoke/${toolName}`}
+    >
+      <div
+        className={cn(
+          'flex flex-1 flex-col gap-1.5',
+          isUser ? 'items-end' : 'items-start'
+        )}
+      >
+        {isUser && message.content && (
+          <div
+            className={cn(
+              'max-w-[min(100%,32rem)] rounded-[20px] rounded-tr-[4px] bg-primary px-4 py-2.5 text-sm leading-relaxed text-primary-foreground shadow-sm'
+            )}
+          >
+            <div
+              className={cn(
+                'prose prose-sm max-w-none',
+                '[&_*]:text-primary-foreground prose-headings:text-primary-foreground prose-strong:text-primary-foreground',
+              )}
+            >
+              <MarkdownContent
+                content={message.content}
+                variant="user"
               />
             </div>
-          );
-        })}
+          </div>
+        )}
 
-        {message.content && (
-          <div className={cn(
-            "px-4 py-2.5 rounded-[20px] text-sm leading-relaxed shadow-sm",
-            isUser
-              ? "bg-primary text-white rounded-tr-[4px]"
-              : "bg-zinc-100 dark:bg-zinc-800 text-foreground rounded-tl-[4px]"
-          )}>
-            <div className={cn(
-              "prose prose-sm max-w-none",
-              isUser ? "prose-invert" : "dark:prose-invert"
-            )}>
-              <ReactMarkdown>{message.content}</ReactMarkdown>
-            </div>
+        {!isUser && (message.content || showAssistantActions) && (
+          <div className="max-w-3xl py-1 text-[15px] leading-7 text-foreground">
+            {message.content && (
+              <div
+                className={cn(
+                  'prose prose-sm max-w-none',
+                  'prose-p:my-2 prose-headings:mt-4 prose-headings:mb-2 dark:prose-invert prose-a:text-primary',
+                )}
+              >
+                <MarkdownContent
+                  content={message.content}
+                  variant="assistant"
+                />
+              </div>
+            )}
+            {showAssistantActions && (
+              <div
+                className={cn(
+                  'mt-2 flex flex-wrap items-center gap-1 pt-2',
+                  message.content && 'border-t border-border/40',
+                )}
+              >
+                {onCopyAssistant && (
+                  <button
+                    type="button"
+                    onClick={onCopyAssistant}
+                    disabled={!message.content?.trim()}
+                    className="inline-flex items-center gap-1 rounded-md px-2 py-1 text-xs text-muted-foreground transition-colors hover:bg-muted/60 hover:text-foreground disabled:pointer-events-none disabled:opacity-40"
+                  >
+                    <Copy className="size-3.5 shrink-0 opacity-80" aria-hidden />
+                    复制
+                  </button>
+                )}
+                {onRegenerate && (
+                  <button
+                    type="button"
+                    disabled={regenerateDisabled}
+                    onClick={onRegenerate}
+                    className="inline-flex items-center gap-1 rounded-md px-2 py-1 text-xs text-muted-foreground transition-colors hover:bg-muted/60 hover:text-foreground disabled:pointer-events-none disabled:opacity-40"
+                  >
+                    <RotateCcw className="size-3.5 shrink-0 opacity-80" aria-hidden />
+                    重新生成
+                  </button>
+                )}
+              </div>
+            )}
           </div>
         )}
       </div>

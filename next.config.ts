@@ -1,6 +1,8 @@
 import type {NextConfig} from 'next';
 
 const nextConfig: NextConfig = {
+  /** 开发模式下隐藏右下角/左下角「Route / Turbopack」等浮层；生产构建不会出现 */
+  devIndicators: false,
   reactStrictMode: true,
   eslint: {
     ignoreDuringBuilds: true,

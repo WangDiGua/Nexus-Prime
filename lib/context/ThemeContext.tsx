@@ -1,9 +1,15 @@
 'use client';
 
 import { createContext, useContext, useEffect, useState, ReactNode } from 'react';
+import {
+  THEME_STORAGE_KEY,
+  readThemePreferenceFromStorage,
+  resolveStoredTheme,
+  type ResolvedTheme as LibResolvedTheme,
+} from '@/lib/theme-resolve';
 
 export type Theme = 'LIGHT' | 'DARK' | 'SYSTEM';
-export type ResolvedTheme = 'light' | 'dark';
+export type ResolvedTheme = LibResolvedTheme;
 
 interface ThemeContextType {
   theme: Theme;
@@ -13,18 +19,11 @@ interface ThemeContextType {
 
 const ThemeContext = createContext<ThemeContextType | undefined>(undefined);
 
-const THEME_STORAGE_KEY = 'nexus-theme';
-
 function getSystemTheme(): ResolvedTheme {
   if (typeof window === 'undefined') return 'dark';
-  return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
-}
-
-function resolveTheme(theme: Theme): ResolvedTheme {
-  if (theme === 'SYSTEM') {
-    return getSystemTheme();
-  }
-  return theme.toLowerCase() as ResolvedTheme;
+  return window.matchMedia('(prefers-color-scheme: dark)').matches
+    ? 'dark'
+    : 'light';
 }
 
 interface ThemeProviderProps {
@@ -32,24 +31,25 @@ interface ThemeProviderProps {
   defaultTheme?: Theme;
 }
 
+/**
+ * 首帧 theme 从 localStorage 同步初始化（与 layout 内联脚本一致），避免刷新时先亮后暗。
+ * documentElement 的 class 由内联脚本抢先设置 + 本组件 useEffect 同步。
+ */
 export function ThemeProvider({ children, defaultTheme = 'SYSTEM' }: ThemeProviderProps) {
-  const [theme, setThemeState] = useState<Theme>(defaultTheme);
-  const [resolvedTheme, setResolvedTheme] = useState<ResolvedTheme>(() => resolveTheme(defaultTheme));
-  const [mounted, setMounted] = useState(false);
+  const [theme, setThemeState] = useState<Theme>(() => {
+    if (typeof window === 'undefined') return defaultTheme;
+    return readThemePreferenceFromStorage() ?? defaultTheme;
+  });
+
+  const [resolvedTheme, setResolvedTheme] = useState<ResolvedTheme>(() => {
+    if (typeof window === 'undefined') return 'dark';
+    const t = readThemePreferenceFromStorage() ?? defaultTheme;
+    return resolveStoredTheme(t);
+  });
 
   useEffect(() => {
-    const savedTheme = localStorage.getItem(THEME_STORAGE_KEY) as Theme | null;
-    const initialTheme = savedTheme || defaultTheme;
-    setThemeState(initialTheme);
-    setResolvedTheme(resolveTheme(initialTheme));
-    setMounted(true);
-  }, [defaultTheme]);
-
-  useEffect(() => {
-    if (!mounted) return;
-
     const mediaQuery = window.matchMedia('(prefers-color-scheme: dark)');
-    
+
     const handleChange = () => {
       if (theme === 'SYSTEM') {
         setResolvedTheme(getSystemTheme());
@@ -58,25 +58,19 @@ export function ThemeProvider({ children, defaultTheme = 'SYSTEM' }: ThemeProvid
 
     mediaQuery.addEventListener('change', handleChange);
     return () => mediaQuery.removeEventListener('change', handleChange);
-  }, [theme, mounted]);
+  }, [theme]);
 
   useEffect(() => {
-    if (!mounted) return;
-
     const root = document.documentElement;
     root.classList.remove('light', 'dark');
     root.classList.add(resolvedTheme);
-  }, [resolvedTheme, mounted]);
+  }, [resolvedTheme]);
 
   const setTheme = (newTheme: Theme) => {
     setThemeState(newTheme);
-    setResolvedTheme(resolveTheme(newTheme));
+    setResolvedTheme(resolveStoredTheme(newTheme));
     localStorage.setItem(THEME_STORAGE_KEY, newTheme);
   };
-
-  if (!mounted) {
-    return null;
-  }
 
   return (
     <ThemeContext.Provider value={{ theme, resolvedTheme, setTheme }}>
