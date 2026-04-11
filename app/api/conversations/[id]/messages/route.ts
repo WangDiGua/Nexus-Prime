@@ -64,10 +64,18 @@ export async function POST(
       model,
     });
 
-    await conversationService.updateMessageCount(conversationId);
+    try {
+      await conversationService.updateMessageCount(conversationId);
+    } catch (e) {
+      console.error('updateMessageCount after create:', e);
+    }
 
     if (role === 'USER' && !conversation.title) {
-      await conversationService.generateTitle(conversationId, content);
+      try {
+        await conversationService.generateTitle(conversationId, content);
+      } catch (e) {
+        console.error('generateTitle after create:', e);
+      }
     }
 
     return NextResponse.json(message, { status: 201 });
@@ -76,6 +84,13 @@ export async function POST(
     if (error instanceof Error && error.message === 'Unauthorized') {
       return NextResponse.json({ error: '未授权' }, { status: 401 });
     }
-    return NextResponse.json({ error: '创建消息失败' }, { status: 500 });
+    const detail =
+      process.env.NODE_ENV === 'development' && error instanceof Error
+        ? error.message
+        : undefined;
+    return NextResponse.json(
+      { error: '创建消息失败', ...(detail ? { detail } : {}) },
+      { status: 500 }
+    );
   }
 }

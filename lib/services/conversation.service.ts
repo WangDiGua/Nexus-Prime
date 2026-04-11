@@ -155,11 +155,19 @@ export class ConversationService {
       _sum: { tokensUsed: true },
     });
 
+    const rawSum = result._sum.tokensUsed;
+    const totalTokens =
+      rawSum == null
+        ? 0
+        : typeof rawSum === 'bigint'
+          ? Number(rawSum)
+          : Math.trunc(Number(rawSum));
+
     await prisma.conversation.update({
       where: { id },
       data: {
         messageCount: result._count.id,
-        totalTokens: result._sum.tokensUsed || 0,
+        totalTokens: Number.isFinite(totalTokens) ? totalTokens : 0,
         lastMessageAt: new Date(),
       },
     });

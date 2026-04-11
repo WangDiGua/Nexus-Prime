@@ -50,22 +50,42 @@ function toJson(value: Record<string, unknown> | undefined): Prisma.InputJsonVal
   return value as Prisma.InputJsonValue;
 }
 
+/** Accepts object or array from JSON body; strips non-JSON-safe values. */
+function toPrismaJsonField(value: unknown): Prisma.InputJsonValue | undefined {
+  if (value == null) return undefined;
+  try {
+    return JSON.parse(JSON.stringify(value)) as Prisma.InputJsonValue;
+  } catch {
+    return undefined;
+  }
+}
+
+function normalizeMessageRole(
+  role: unknown
+): 'USER' | 'ASSISTANT' | 'SYSTEM' {
+  const r = String(role ?? '').toUpperCase();
+  if (r === 'USER' || r === 'ASSISTANT' || r === 'SYSTEM') return r;
+  return 'ASSISTANT';
+}
+
 export class MessageService {
   async create(data: CreateMessageData) {
     const user = await getAuthUser();
     if (!user) throw new Error('Unauthorized');
 
+    const role = normalizeMessageRole(data.role);
+
     const message = await prisma.message.create({
       data: {
         conversationId: data.conversationId,
-        role: data.role,
+        role,
         content: data.content,
         toolCalls: toJson(data.toolCalls),
         toolResults: toJson(data.toolResults),
-        thinkingLog: toJson(data.thinkingLog),
-        thinkingStepDurationsMs: data.thinkingStepDurationsMs
-          ? (data.thinkingStepDurationsMs as Prisma.InputJsonValue)
-          : undefined,
+        thinkingLog: toPrismaJsonField(data.thinkingLog as unknown),
+        thinkingStepDurationsMs: toPrismaJsonField(
+          data.thinkingStepDurationsMs as unknown
+        ),
         tokensUsed: data.tokensUsed || 0,
         latencyMs: data.latencyMs || 0,
         model: data.model,
@@ -81,9 +101,9 @@ export class MessageService {
         await vectorService.insertVector({
           id: message.id,
           messageId: message.id,
-          conversationId: message.conversationId,
+          conversationId: data.conversationId,
           userId: user.userId,
-          role: data.role,
+          role,
           content: data.content.slice(0, 1000),
           embedding: embeddingResult.embedding,
           createdAt: Date.now(),

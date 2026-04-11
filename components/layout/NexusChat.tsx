@@ -146,6 +146,13 @@ function ThinkingTrace({
 
   const showDetail = isLoading || expandedAfterDone;
 
+  const completedLogs =
+    isLoading && logs.length > 1
+      ? logs.slice(0, -1)
+      : !isLoading
+        ? logs
+        : [];
+
   return (
     <div className="max-w-3xl mx-auto animate-ios-fade-in">
       <button
@@ -177,8 +184,13 @@ function ThinkingTrace({
               <p className="mb-1 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
                 当前思考
               </p>
-              <div className="flex items-start gap-2.5 font-mono text-xs text-muted-foreground">
-                <ThinkingStepRing state="active" className="mt-0.5" />
+              <div className="flex items-stretch gap-2.5 font-mono text-xs text-muted-foreground">
+                <div className="flex w-5 shrink-0 flex-col items-center self-stretch">
+                  <ThinkingStepRing
+                    state="active"
+                    className="mt-0.5 shrink-0"
+                  />
+                </div>
                 <span className="min-w-0 flex-1 leading-relaxed">
                   正在发起请求，等待模型返回思考步骤…
                 </span>
@@ -186,12 +198,7 @@ function ThinkingTrace({
             </div>
           )}
 
-          {(isLoading && logs.length > 1
-            ? logs.slice(0, -1)
-            : !isLoading
-              ? logs
-              : []
-          ).map((log, origIdx) => {
+          {completedLogs.map((log, origIdx) => {
             const kind = classifyThinkingLog(log);
             const text = cleanThinkingLogForDisplay(log);
             const d = stepDurationsMs?.[origIdx];
@@ -209,18 +216,31 @@ function ThinkingTrace({
               stepDurationsMs,
               isLoading,
             );
+            const showConnectorBelow =
+              origIdx < completedLogs.length - 1 ||
+              (isLoading &&
+                logs.length > 0 &&
+                origIdx === completedLogs.length - 1);
             return (
               <div
                 key={origIdx}
                 className={cn(
-                  'flex items-start gap-2.5 rounded px-2 py-1 font-mono text-xs',
+                  'flex items-stretch gap-2.5 rounded px-2 py-1 font-mono text-xs',
                   thinkingLogRowTextClass(kind),
                 )}
               >
-                <ThinkingStepRing
-                  state={ringState}
-                  className="mt-0.5"
-                />
+                <div className="flex w-5 shrink-0 flex-col items-center self-stretch">
+                  <ThinkingStepRing
+                    state={ringState}
+                    className="mt-0.5 shrink-0"
+                  />
+                  {showConnectorBelow && (
+                    <div
+                      className="mb-[-0.5rem] mt-0 min-h-[0.5rem] w-px flex-1 bg-border/80"
+                      aria-hidden
+                    />
+                  )}
+                </div>
                 <span className="min-w-0 flex-1 break-words leading-snug">{text}</span>
                 {durationMs !== undefined && (
                   <span className="ml-1 shrink-0 tabular-nums text-muted-foreground">
@@ -250,8 +270,13 @@ function ThinkingTrace({
                 <p className="mb-1.5 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
                   当前思考
                 </p>
-                <div className="flex items-start gap-2.5 font-mono text-xs">
-                  <ThinkingStepRing state="active" className="mt-0.5" />
+                <div className="flex items-stretch gap-2.5 font-mono text-xs">
+                  <div className="flex w-5 shrink-0 flex-col items-center self-stretch">
+                    <ThinkingStepRing
+                      state="active"
+                      className="mt-0.5 shrink-0"
+                    />
+                  </div>
                   <span className="min-w-0 flex-1 break-words leading-relaxed">
                     {text}
                   </span>
