@@ -55,12 +55,7 @@ export default function ChatMessage({
               'max-w-[min(100%,32rem)] rounded-[20px] rounded-tr-[4px] bg-primary px-4 py-2.5 text-sm leading-relaxed text-primary-foreground shadow-sm'
             )}
           >
-            <div
-              className={cn(
-                'prose prose-sm max-w-none',
-                '[&_*]:text-primary-foreground prose-headings:text-primary-foreground prose-strong:text-primary-foreground',
-              )}
-            >
+            <div className="max-w-none text-sm leading-relaxed">
               <MarkdownContent
                 content={message.content}
                 variant="user"
@@ -72,12 +67,7 @@ export default function ChatMessage({
         {!isUser && (message.content || showAssistantActions) && (
           <div className="max-w-3xl py-1 text-[15px] leading-7 text-foreground">
             {message.content && (
-              <div
-                className={cn(
-                  'prose prose-sm max-w-none',
-                  'prose-p:my-2 prose-headings:mt-4 prose-headings:mb-2 dark:prose-invert prose-a:text-primary',
-                )}
-              >
+              <div className="max-w-none text-[15px] leading-relaxed text-foreground">
                 <MarkdownContent
                   content={message.content}
                   variant="assistant"

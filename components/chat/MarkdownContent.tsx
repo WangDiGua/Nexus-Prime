@@ -41,6 +41,15 @@ function normalizeLanguage(lang: string): string {
   return prismLanguageAlias[lower] ?? lower;
 }
 
+/** 不依赖 tailwind typography 插件，保证助手消息有清晰标题/列表/段落层次 */
+function mdText(isUser: boolean) {
+  return isUser ? 'text-primary-foreground/95' : 'text-foreground/95';
+}
+
+function mdHeading(isUser: boolean) {
+  return isUser ? 'text-primary-foreground' : 'text-foreground';
+}
+
 export function MarkdownContent({
   content,
   variant,
@@ -54,6 +63,166 @@ export function MarkdownContent({
 
   const components: Components = useMemo(
     () => ({
+      h1({ children, ...props }) {
+        return (
+          <h1
+            className={cn(
+              'mb-3 mt-6 text-xl font-semibold tracking-tight first:mt-0',
+              mdHeading(isUser),
+            )}
+            {...props}
+          >
+            {children}
+          </h1>
+        );
+      },
+      h2({ children, ...props }) {
+        return (
+          <h2
+            className={cn(
+              'mb-2.5 mt-5 text-lg font-semibold tracking-tight',
+              mdHeading(isUser),
+            )}
+            {...props}
+          >
+            {children}
+          </h2>
+        );
+      },
+      h3({ children, ...props }) {
+        return (
+          <h3
+            className={cn(
+              'mb-2 mt-4 text-base font-semibold',
+              mdHeading(isUser),
+            )}
+            {...props}
+          >
+            {children}
+          </h3>
+        );
+      },
+      h4({ children, ...props }) {
+        return (
+          <h4
+            className={cn(
+              'mb-1.5 mt-3 text-[15px] font-semibold',
+              mdHeading(isUser),
+            )}
+            {...props}
+          >
+            {children}
+          </h4>
+        );
+      },
+      h5({ children, ...props }) {
+        return (
+          <h5
+            className={cn(
+              'mb-1.5 mt-3 text-sm font-semibold',
+              mdHeading(isUser),
+            )}
+            {...props}
+          >
+            {children}
+          </h5>
+        );
+      },
+      h6({ children, ...props }) {
+        return (
+          <h6
+            className={cn(
+              'mb-1.5 mt-3 text-sm font-medium text-muted-foreground',
+              isUser && 'text-primary-foreground/90',
+            )}
+            {...props}
+          >
+            {children}
+          </h6>
+        );
+      },
+      p({ children, ...props }) {
+        return (
+          <p
+            className={cn(
+              'my-2.5 leading-[1.65] first:mt-0 last:mb-0',
+              mdText(isUser),
+              // 常见「整行只有 **小标题**」：抬成伪标题层次
+              '[&:has(>strong:only-child)]:mb-2 [&:has(>strong:only-child)]:mt-4 first:[&:has(>strong:only-child)]:mt-0',
+              '[&:has(>strong:only-child)>strong]:text-base [&:has(>strong:only-child)>strong]:font-semibold',
+              '[&:has(>strong:only-child)>strong]:tracking-tight',
+              !isUser &&
+                '[&:has(>strong:only-child)>strong]:text-foreground [&:has(>strong:only-child)>strong]:block',
+            )}
+            {...props}
+          >
+            {children}
+          </p>
+        );
+      },
+      ul({ children, ...props }) {
+        return (
+          <ul
+            className={cn(
+              'my-3 list-outside list-disc space-y-1.5 pl-5 marker:text-muted-foreground',
+              mdText(isUser),
+              '[&_ul]:my-2 [&_ul]:list-[circle]',
+            )}
+            {...props}
+          >
+            {children}
+          </ul>
+        );
+      },
+      ol({ children, ...props }) {
+        return (
+          <ol
+            className={cn(
+              'my-3 list-outside list-decimal space-y-1.5 pl-5 marker:font-medium marker:text-muted-foreground',
+              mdText(isUser),
+              '[&_ol]:my-2',
+            )}
+            {...props}
+          >
+            {children}
+          </ol>
+        );
+      },
+      li({ children, ...props }) {
+        return (
+          <li
+            className={cn('leading-relaxed [&>p]:my-1 [&>p:first-child]:mt-0', mdText(isUser))}
+            {...props}
+          >
+            {children}
+          </li>
+        );
+      },
+      hr({ ...props }) {
+        return (
+          <hr
+            className="my-6 border-0 border-t border-border/80"
+            {...props}
+          />
+        );
+      },
+      strong({ children, ...props }) {
+        return (
+          <strong
+            className={cn('font-semibold', mdHeading(isUser))}
+            {...props}
+          >
+            {children}
+          </strong>
+        );
+      },
+      em({ children, ...props }) {
+        return (
+          <em className="italic opacity-95" {...props}>
+            {children}
+          </em>
+        );
+      },
       pre({ children }) {
         return <>{children}</>;
       },

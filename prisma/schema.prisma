@@ -64,7 +64,8 @@ model Message {
   id             String   @id @default(uuid()) @db.VarChar(36)
   conversationId String   @map("conversation_id") @db.VarChar(36)
   role           MessageRole
-  content        String
+  // 长对话/长回复须用 LONGTEXT，避免超过 VARCHAR/TEXT 上限导致保存失败
+  content        String   @db.LongText
   toolCalls      Json?    @map("tool_calls")
   toolResults    Json?    @map("tool_results")
   thinkingLog              Json?    @map("thinking_log")

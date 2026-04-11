@@ -3,6 +3,7 @@
 import { createContext, useContext, useEffect, useState, ReactNode } from 'react';
 import {
   THEME_STORAGE_KEY,
+  cookieStringForTheme,
   readThemePreferenceFromStorage,
   resolveStoredTheme,
   type ResolvedTheme as LibResolvedTheme,
@@ -69,7 +70,12 @@ export function ThemeProvider({ children, defaultTheme = 'SYSTEM' }: ThemeProvid
   const setTheme = (newTheme: Theme) => {
     setThemeState(newTheme);
     setResolvedTheme(resolveStoredTheme(newTheme));
-    localStorage.setItem(THEME_STORAGE_KEY, newTheme);
+    try {
+      localStorage.setItem(THEME_STORAGE_KEY, newTheme);
+      document.cookie = cookieStringForTheme(newTheme);
+    } catch {
+      /* ignore */
+    }
   };
 
   return (

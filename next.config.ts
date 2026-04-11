@@ -4,6 +4,18 @@ const nextConfig: NextConfig = {
   /** 开发模式下隐藏右下角/左下角「Route / Turbopack」等浮层；生产构建不会出现 */
   devIndicators: false,
   reactStrictMode: true,
+  /** 让浏览器在后续请求中带上 Sec-CH-Prefers-Color-Scheme，供 layout 做 SSR 暗色首屏 */
+  async headers() {
+    return [
+      {
+        source: '/:path*',
+        headers: [
+          { key: 'Accept-CH', value: 'Sec-CH-Prefers-Color-Scheme' },
+          { key: 'Critical-CH', value: 'Sec-CH-Prefers-Color-Scheme' },
+        ],
+      },
+    ];
+  },
   eslint: {
     ignoreDuringBuilds: true,
   },
