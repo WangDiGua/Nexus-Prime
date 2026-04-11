@@ -6,3 +6,8 @@ coverage/
 *.tsbuildinfo
 .env*
 !.env.example
+
+# Git objects (should never be in app directory)
+app/objects/
+
+/generated/prisma

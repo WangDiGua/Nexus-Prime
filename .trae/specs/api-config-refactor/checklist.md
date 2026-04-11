@@ -1,0 +1,6 @@
+- [x] `lib/api-config.ts` 已创建，包含完整的配置接口和默认值
+- [x] `LantuClient` 已重构，所有端点路径和字段名从配置读取
+- [x] `ToolExecutor` 已重构，所有字段名从配置读取
+- [x] `.env.example` 已更新，包含所有新配置项及注释
+- [x] API Routes 已更新，使用配置化的超时和迭代次数
+- [x] TypeScript 编译无错误

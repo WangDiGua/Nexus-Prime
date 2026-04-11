@@ -3,8 +3,21 @@
 import { User, Bot } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import { cn } from '@/lib/utils';
-import { Message } from 'ai';
 import ToolCard from './ToolCard';
+import type { ToolResult } from '@/types/chat';
+
+interface Message {
+  id: string;
+  role: 'user' | 'assistant' | 'system';
+  content: string;
+  toolInvocations?: Array<{
+    toolCallId: string;
+    toolName: string;
+    args: Record<string, unknown>;
+    state: 'calling' | 'result';
+    result?: ToolResult;
+  }>;
+}
 
 interface ChatMessageProps {
   message: Message;
@@ -28,11 +41,42 @@ export default function ChatMessage({ message }: ChatMessageProps) {
         "flex flex-col gap-1.5 flex-1",
         isUser ? "items-end" : "items-start"
       )}>
+        {message.toolInvocations?.map((toolInvocation) => {
+          const { toolName, toolCallId, state, result } = toolInvocation;
+
+          if (state === 'result' && result) {
+            return (
+              <div key={toolCallId} className="w-full mt-2">
+                <ToolCard
+                  toolName={toolName}
+                  args={toolInvocation.args}
+                  status={result.status === 'success' ? 'success' : 'error'}
+                  result={result.result}
+                  latency={`${result.latency || 0}ms`}
+                  endpoint={`/invoke/${toolName}`}
+                  error={result.error}
+                />
+              </div>
+            );
+          }
+
+          return (
+            <div key={toolCallId} className="w-full mt-2">
+              <ToolCard
+                toolName={toolName}
+                args={toolInvocation.args}
+                status="calling"
+                endpoint={`/invoke/${toolName}`}
+              />
+            </div>
+          );
+        })}
+
         {message.content && (
           <div className={cn(
             "px-4 py-2.5 rounded-[20px] text-sm leading-relaxed shadow-sm",
-            isUser 
-              ? "bg-primary text-white rounded-tr-[4px]" 
+            isUser
+              ? "bg-primary text-white rounded-tr-[4px]"
               : "bg-zinc-100 dark:bg-zinc-800 text-foreground rounded-tl-[4px]"
           )}>
             <div className={cn(
@@ -43,36 +87,6 @@ export default function ChatMessage({ message }: ChatMessageProps) {
             </div>
           </div>
         )}
-
-        {message.toolInvocations?.map((toolInvocation) => {
-          const { toolName, toolCallId, state } = toolInvocation;
-
-          if (state === 'result') {
-            return (
-              <div key={toolCallId} className="w-full mt-2">
-                <ToolCard 
-                  toolName={toolName}
-                  args={toolInvocation.args}
-                  status="success"
-                  result={toolInvocation.result}
-                  latency="自动计算"
-                  endpoint={`/api/chat#${toolName}`}
-                />
-              </div>
-            );
-          }
-
-          return (
-            <div key={toolCallId} className="w-full mt-2">
-              <ToolCard 
-                toolName={toolName}
-                args={toolInvocation.args}
-                status="calling"
-                endpoint={`/api/chat#${toolName}`}
-              />
-            </div>
-          );
-        })}
       </div>
     </div>
   );

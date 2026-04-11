@@ -1,41 +1,115 @@
-import ky from 'ky';
-import { Skill, McpServer } from '@/types/registry';
+import { Skill, McpServer, Resource } from '@/types/registry';
 
 class RegistryClient {
   private baseUrl: string;
 
-  constructor(baseUrl: string = 'https://api.lantu.com/v1') {
-    this.baseUrl = baseUrl;
+  constructor() {
+    this.baseUrl = typeof window !== 'undefined' ? '/api' : '';
   }
 
-  async fetchCapabilities(): Promise<{ mcpServers: McpServer[], skills: Skill[] }> {
-    // 模拟 API 调用
-    await new Promise(resolve => setTimeout(resolve, 800));
-    return {
-      mcpServers: [
-        { id: 'mcp-1', name: '文件服务器-MCP', status: '已连接', icon: 'FileText' },
-        { id: 'mcp-2', name: '数据库-MCP', status: '已连接', icon: 'Database' },
-      ],
-      skills: [
-        { id: 'skill-1', name: '发送邮件', type: '远程', icon: 'Mail', endpoint: `${this.baseUrl}/email`, description: '通过 SMTP 发送系统通知或用户邮件' },
-        { id: 'skill-2', name: '生成图表', type: '远程', icon: 'BarChart3', endpoint: `${this.baseUrl}/charts`, description: '将结构化数据转换为可视化图表' },
-        { id: 'skill-3', name: '网页搜索', type: '远程', icon: 'Globe', endpoint: `${this.baseUrl}/search`, description: '实时检索互联网公开信息' },
-      ]
-    };
+  async fetchCapabilities(): Promise<{ mcpServers: McpServer[], skills: Skill[], resources: Resource[] }> {
+    try {
+      const [toolsRes, resourcesRes] = await Promise.all([
+        fetch(`${this.baseUrl}/tools`),
+        fetch(`${this.baseUrl}/resources`),
+      ]);
+
+      const toolsData = toolsRes.ok ? await toolsRes.json() : { data: { tools: [], routes: [] } };
+      const resourcesData = resourcesRes.ok ? await resourcesRes.json() : { data: { items: [] } };
+
+      const tools = toolsData.data?.tools || [];
+      const routes = toolsData.data?.routes || [];
+      const resources = resourcesData.data?.items || [];
+
+      const mcpServers: McpServer[] = [];
+      const serverMap = new Map<string, McpServer>();
+
+      for (const tool of tools) {
+        const meta = tool._lantu;
+        if (meta && meta.resourceType === 'mcp') {
+          const serverId = meta.resourceId;
+          if (!serverMap.has(serverId)) {
+            serverMap.set(serverId, {
+              id: serverId,
+              name: meta.resourceName || serverId,
+              status: '已连接',
+              icon: 'Server',
+            });
+          }
+        }
+      }
+      
+      for (const server of serverMap.values()) {
+        mcpServers.push(server);
+      }
+
+      const skills: Skill[] = tools.map((tool: any) => ({
+        id: tool.function.name,
+        name: tool.function.name,
+        type: tool._lantu?.resourceType || '远程',
+        icon: 'Zap',
+        endpoint: `/invoke/${tool.function.name}`,
+        description: tool.function.description,
+      }));
+
+      return { mcpServers, skills, resources };
+    } catch (error) {
+      console.error('Failed to fetch capabilities:', error);
+      return { mcpServers: [], skills: [], resources: [] };
+    }
   }
 
-  async remoteInvoke(skill: Skill, payload: any): Promise<any> {
+  async fetchResources(params?: {
+    resourceType?: string;
+    status?: string;
+    keyword?: string;
+  }): Promise<Resource[]> {
+    try {
+      const searchParams = new URLSearchParams();
+      if (params?.resourceType) searchParams.set('resourceType', params.resourceType);
+      if (params?.status) searchParams.set('status', params.status);
+      if (params?.keyword) searchParams.set('keyword', params.keyword);
+
+      const response = await fetch(`${this.baseUrl}/resources?${searchParams.toString()}`);
+      const data = await response.json();
+      return data.data?.items || [];
+    } catch (error) {
+      console.error('Failed to fetch resources:', error);
+      return [];
+    }
+  }
+
+  async remoteInvoke(skill: Skill, payload: Record<string, unknown>): Promise<any> {
     const startTime = Date.now();
     try {
-      // 模拟远程调用
-      await new Promise(resolve => setTimeout(resolve, 1200));
+      const response = await fetch('/api/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          messages: [{ role: 'user', content: `执行 ${skill.name}` }],
+          toolCall: {
+            name: skill.id,
+            args: payload,
+          },
+        }),
+      });
+
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`);
+      }
+
+      const data = await response.json();
       return {
         status: 'success',
-        data: { message: `已成功调用 ${skill.name}` },
-        latency: `${Date.now() - startTime}ms`
+        data: data.result || data,
+        latency: `${Date.now() - startTime}ms`,
       };
     } catch (error) {
-      throw new Error(`Failed to invoke skill ${skill.name}`);
+      return {
+        status: 'error',
+        error: error instanceof Error ? error.message : 'Unknown error',
+        latency: `${Date.now() - startTime}ms`,
+      };
     }
   }
 }

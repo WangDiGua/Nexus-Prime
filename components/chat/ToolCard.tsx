@@ -5,12 +5,9 @@ import {
   Loader2, 
   CheckCircle2, 
   XCircle, 
-  RefreshCw, 
-  Clock, 
-  Globe,
+  Clock,
   ChevronDown,
   ChevronUp,
-  Code2,
   Zap
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
@@ -18,11 +15,12 @@ import { cn } from '@/lib/utils';
 
 interface ToolCardProps {
   toolName: string;
-  args: any;
+  args: Record<string, unknown>;
   status: 'calling' | 'success' | 'error';
   latency?: string;
   endpoint?: string;
-  result?: any;
+  result?: unknown;
+  error?: string;
   onRetry?: () => void;
 }
 
@@ -31,15 +29,15 @@ export default function ToolCard({
   args,
   status,
   latency = '0ms',
-  endpoint = 'https://api.lantu.com/v1/skill/exec',
+  endpoint = '/invoke',
   result,
-  onRetry
+  error,
 }: ToolCardProps) {
   const [isExpanded, setIsExpanded] = useState(false);
   const [timer, setTimer] = useState(0);
 
   useEffect(() => {
-    let interval: any;
+    let interval: ReturnType<typeof setInterval>;
     if (status === 'calling') {
       interval = setInterval(() => {
         setTimer(prev => prev + 10);
@@ -118,13 +116,18 @@ export default function ToolCard({
               className="overflow-hidden"
             >
               <div className="pt-2 border-t border-zinc-100 dark:border-zinc-800/50">
-                <span className="text-[9px] font-bold text-muted-foreground uppercase tracking-widest block mb-1.5">响应结果</span>
+                <span className="text-[9px] font-bold text-muted-foreground uppercase tracking-widest block mb-1.5">
+                  {status === 'error' ? '错误信息' : '响应结果'}
+                </span>
                 <div className={cn(
                   "p-3 rounded-xl font-mono text-[10px] border",
                   status === 'success' ? "bg-ios-green/5 border-ios-green/10 text-foreground" : "bg-ios-red/5 border-ios-red/10 text-ios-red"
                 )}>
                   <pre className="overflow-x-auto">
-                    {JSON.stringify(result || { error: "获取结果失败" }, null, 2)}
+                    {status === 'error' 
+                      ? JSON.stringify({ error: error || 'Unknown error' }, null, 2)
+                      : JSON.stringify(result ?? { data: null }, null, 2)
+                    }
                   </pre>
                 </div>
               </div>
@@ -144,15 +147,6 @@ export default function ToolCard({
               {status === 'success' ? '执行成功' : '执行失败'}
             </span>
           </div>
-          {status === 'error' && (
-            <button 
-              onClick={onRetry}
-              className="flex items-center gap-1 text-[9px] font-bold text-primary hover:opacity-80 transition-all"
-            >
-              <RefreshCw size={10} />
-              重试
-            </button>
-          )}
         </div>
       )}
     </motion.div>

@@ -1,152 +1,413 @@
-import { NextRequest, NextResponse } from 'next/server';
+import { NextRequest } from 'next/server';
+import { createToolExecutor } from '@/lib/tool-executor';
+import { createApiConfig } from '@/lib/api-config';
+import { ChatSSEEvent, ToolCall, ToolResult } from '@/types/chat';
+import { settingsService } from '@/lib/services/settings.service';
+import { messageService } from '@/lib/services/message.service';
+import { llmCache, toolCache } from '@/lib/cache/redis';
+import { vectorService } from '@/lib/vector/milvus';
+import { embeddingService } from '@/lib/vector/embedding';
 
-const SYSTEM_INSTRUCTION = `你是一个名为 Nexus-Prime 的高级 AI 助手。
-你拥有访问远程能力（Skills）和 MCP 服务器的权限。
-当用户要求执行特定任务时，优先考虑使用工具。
-在调用工具前，请简要说明你的思考过程。`;
+const apiConfig = createApiConfig();
 
-const TOOLS = [
-  {
-    type: 'function' as const,
-    function: {
-      name: 'query_database',
-      description: '查询远程数据库以获取用户信息',
-      parameters: {
-        type: 'object',
-        properties: {
-          table: { type: 'string', description: '要查询的表名' },
-          query: { type: 'string', description: '查询条件' },
-        },
-        required: ['table', 'query'],
-      },
-    },
-  },
-  {
-    type: 'function' as const,
-    function: {
-      name: 'send_email',
-      description: '发送电子邮件',
-      parameters: {
-        type: 'object',
-        properties: {
-          to: { type: 'string', description: '收件人邮箱' },
-          subject: { type: 'string', description: '邮件主题' },
-          body: { type: 'string', description: '邮件内容' },
-        },
-        required: ['to', 'subject', 'body'],
-      },
-    },
-  },
-];
+const DASHSCOPE_BASE_URL = process.env.DASHSCOPE_BASE_URL?.replace(/\/$/, '');
+const DASHSCOPE_API_KEY = process.env.DASHSCOPE_API_KEY;
 
-type ChatMessage = { role: string; content: string };
+interface OpenAIMessage {
+  role: 'system' | 'user' | 'assistant' | 'tool';
+  content: string;
+  tool_calls?: Array<{
+    id: string;
+    type: 'function';
+    function: { name: string; arguments: string };
+  }>;
+  tool_call_id?: string;
+}
 
-export async function POST(req: NextRequest) {
-  const apiKey = process.env.DASHSCOPE_API_KEY;
-  const baseUrl = process.env.DASHSCOPE_BASE_URL?.replace(/\/$/, '');
-  const model = process.env.DASHSCOPE_MODEL || 'qwen-plus-latest';
+function encodeSSE(event: ChatSSEEvent): string {
+  return `data: ${JSON.stringify(event)}\n\n`;
+}
 
-  if (!apiKey || !baseUrl) {
-    return NextResponse.json(
-      { error: '缺少 DASHSCOPE_API_KEY 或 DASHSCOPE_BASE_URL' },
-      { status: 500 }
-    );
-  }
-
-  let body: { messages?: ChatMessage[] };
+async function getRelevantHistory(
+  query: string,
+  conversationId: string,
+  limit: number = 5
+): Promise<OpenAIMessage[]> {
   try {
-    body = await req.json();
-  } catch {
-    return NextResponse.json({ error: '无效的 JSON 请求体' }, { status: 400 });
+    const queryEmbedding = await embeddingService.embed(query);
+    const similarMessages = await vectorService.searchSimilar(queryEmbedding.embedding, { topK: limit });
+    
+    if (similarMessages.length === 0) return [];
+
+    const messageIds = similarMessages.map((m) => m.messageId);
+    const messages = await Promise.all(
+      messageIds.map((id) => messageService.findById(id))
+    );
+
+    return messages
+      .filter((m) => m && m.conversationId !== conversationId)
+      .map((m) => ({
+        role: m!.role.toLowerCase() as 'user' | 'assistant',
+        content: m!.content,
+      }));
+  } catch (error) {
+    console.error('[VectorSearch] Error:', error);
+    return [];
+  }
+}
+
+async function callLLM(
+  messages: OpenAIMessage[],
+  tools?: Array<{ type: 'function'; function: { name: string; description: string; parameters: object } }>,
+  settings?: { model?: string; maxTokens?: number; temperature?: number }
+): Promise<{ content: string | null; toolCalls: ToolCall[]; finishReason: string }> {
+  const model = settings?.model || process.env.DASHSCOPE_MODEL || 'qwen-plus-latest';
+  
+  const cacheKey = `${model}:${JSON.stringify(messages.slice(-2))}:${tools?.length || 0}`;
+  const cached = await llmCache.get<{ content: string | null; toolCalls: ToolCall[]; finishReason: string }>(cacheKey);
+  
+  if (cached) {
+    console.log('[Cache] LLM response hit');
+    return cached;
   }
 
-  const raw = body.messages;
-  if (!Array.isArray(raw) || raw.length === 0) {
-    return NextResponse.json({ error: 'messages 必须为非空数组' }, { status: 400 });
+  const body: Record<string, unknown> = {
+    model,
+    messages,
+    max_tokens: settings?.maxTokens || 4096,
+    temperature: settings?.temperature ?? 0.7,
+  };
+
+  if (tools && tools.length > 0) {
+    body.tools = tools;
+    body.tool_choice = 'auto';
   }
 
-  const messages = raw.map((m) => ({
-    role: m.role === 'assistant' ? 'assistant' : 'user',
-    content: String(m.content ?? ''),
-  }));
-
-  const openaiMessages = [
-    { role: 'system' as const, content: SYSTEM_INSTRUCTION },
-    ...messages,
-  ];
-
-  const upstream = await fetch(`${baseUrl}/chat/completions`, {
+  const response = await fetch(`${DASHSCOPE_BASE_URL}/chat/completions`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      Authorization: `Bearer ${apiKey}`,
+      Authorization: `Bearer ${DASHSCOPE_API_KEY}`,
     },
-    body: JSON.stringify({
-      model,
-      messages: openaiMessages,
-      tools: TOOLS,
-      tool_choice: 'auto',
-    }),
+    body: JSON.stringify(body),
   });
 
-  const rawText = await upstream.text();
-
-  let data: {
-    error?: { message?: string; code?: string; type?: string } | string;
-    choices?: Array<{
-      message?: {
-        content?: string | null;
-        tool_calls?: Array<{
-          id?: string;
-          function?: { name?: string; arguments?: string };
-        }>;
-      };
-    }>;
-  };
-  try {
-    data = rawText ? JSON.parse(rawText) : {};
-  } catch {
-    return NextResponse.json(
-      { error: rawText?.slice(0, 800) || '上游返回非 JSON' },
-      { status: upstream.ok ? 502 : upstream.status }
-    );
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(`LLM API error (${response.status}): ${errorText.slice(0, 500)}`);
   }
 
-  if (!upstream.ok) {
-    const errObj = typeof data.error === 'object' && data.error !== null ? data.error : null;
-    const errMsg =
-      errObj?.message ||
-      (typeof data.error === 'string' ? data.error : null) ||
-      rawText?.slice(0, 800) ||
-      upstream.statusText;
-    return NextResponse.json({ error: errMsg }, { status: upstream.status });
-  }
+  const data = await response.json();
+  const message = data.choices?.[0]?.message;
+  const finishReason = data.choices?.[0]?.finish_reason || 'stop';
 
-  if (typeof data.error === 'object' && data.error !== null && data.error.message) {
-    return NextResponse.json({ error: data.error.message }, { status: 502 });
-  }
-
-  const msg = data.choices?.[0]?.message;
-  const text = typeof msg?.content === 'string' ? msg.content : '';
-
-  const functionCalls: { id: string; name: string; args: Record<string, unknown> }[] = [];
-  for (const tc of msg?.tool_calls ?? []) {
-    const fn = tc.function;
-    if (!fn?.name) continue;
-    let args: Record<string, unknown> = {};
-    if (fn.arguments) {
+  const toolCalls: ToolCall[] = [];
+  if (message?.tool_calls) {
+    for (const tc of message.tool_calls) {
+      let args: Record<string, unknown> = {};
       try {
-        args = JSON.parse(fn.arguments) as Record<string, unknown>;
+        args = JSON.parse(tc.function.arguments);
       } catch {
         args = {};
       }
+      toolCalls.push({
+        id: tc.id,
+        name: tc.function.name,
+        args,
+      });
     }
-    functionCalls.push({
-      id: tc.id ?? '',
-      name: fn.name,
-      args,
-    });
   }
 
-  return NextResponse.json({ text, functionCalls });
+  const result = {
+    content: message?.content || null,
+    toolCalls,
+    finishReason,
+  };
+
+  await llmCache.set(cacheKey, result, 3600);
+
+  return result;
+}
+
+export async function POST(req: NextRequest) {
+  if (!DASHSCOPE_API_KEY || !DASHSCOPE_BASE_URL) {
+    return new Response(
+      JSON.stringify({ error: 'Missing DASHSCOPE_API_KEY or DASHSCOPE_BASE_URL' }),
+      { status: 500, headers: { 'Content-Type': 'application/json' } }
+    );
+  }
+
+  let body: {
+    messages?: Array<{ role: string; content: string }>;
+    conversationId?: string;
+    entryResourceType?: string;
+    entryResourceId?: string;
+  };
+
+  try {
+    body = await req.json();
+  } catch {
+    return new Response(
+      JSON.stringify({ error: 'Invalid JSON body' }),
+      { status: 400, headers: { 'Content-Type': 'application/json' } }
+    );
+  }
+
+  const userMessages = body.messages || [];
+  if (userMessages.length === 0) {
+    return new Response(
+      JSON.stringify({ error: 'Messages array is empty' }),
+      { status: 400, headers: { 'Content-Type': 'application/json' } }
+    );
+  }
+
+  let userSettings: {
+    defaultModel?: string;
+    systemPrompt?: string | null;
+    maxTokens?: number;
+    temperature?: number;
+    enableHistoryContext?: boolean;
+    historyContextLimit?: number;
+    enableVectorSearch?: boolean;
+  } | null = null;
+
+  try {
+    const settings = await settingsService.getSettings();
+    userSettings = {
+      defaultModel: settings.defaultModel,
+      systemPrompt: settings.systemPrompt,
+      maxTokens: settings.maxTokens,
+      temperature: settings.temperature,
+      enableHistoryContext: settings.enableHistoryContext,
+      historyContextLimit: settings.historyContextLimit,
+      enableVectorSearch: settings.enableVectorSearch,
+    };
+  } catch {
+    // User not authenticated or settings not found
+  }
+
+  const encoder = new TextEncoder();
+  const stream = new TransformStream();
+  const writer = stream.writable.getWriter();
+
+  (async () => {
+    try {
+      const toolExecutor = await createToolExecutor(
+        body.entryResourceType,
+        body.entryResourceId
+      );
+      const tools = toolExecutor.getToolDefinitions();
+
+      console.log(`[ReAct] 📦 获取到 ${tools.length} 个工具定义`);
+
+      let openaiTools: Array<{ type: 'function'; function: { name: string; description: string; parameters: object } }> | undefined;
+      
+      if (tools.length > 0) {
+        openaiTools = tools.map((t) => ({
+          type: 'function' as const,
+          function: {
+            name: t.function.name,
+            description: t.function.description,
+            parameters: t.function.parameters,
+          },
+        }));
+      }
+
+      const systemPrompt = userSettings?.systemPrompt || `你是 Nexus-Prime，一个友好、专业的 AI 助手，拥有丰富的远程工具能力。
+
+## 核心能力
+
+你通过 MCP 协议连接了多个远程工具服务器，可以：
+- 🍳 **美食推荐**：推荐今天吃什么、获取菜谱
+- 🌐 **网页抓取**：获取网页内容
+- 🔮 **八字命理**：根据时间计算八字信息
+- 以及更多...
+
+## 工具调用原则
+
+**重要：当用户的问题与你拥有的工具功能相关时，应该主动调用工具获取实时/专业数据！**
+
+## 参数格式要求
+
+**关键：工具参数值必须是纯文本，不要使用任何 Markdown 格式！**
+
+## 对话风格
+
+1. 保持友好、自然的对话风格
+2. 调用工具前，简要说明你将做什么
+3. 将工具返回的结果以自然的方式呈现给用户
+4. 如果工具调用失败，向用户解释情况并提供替代方案`;
+
+      const conversationHistory: OpenAIMessage[] = [
+        { role: 'system', content: systemPrompt },
+      ];
+
+      if (userSettings?.enableHistoryContext && body.conversationId) {
+        const contextLimit = userSettings.historyContextLimit || 10;
+        const history = await messageService.getConversationContext(
+          body.conversationId,
+          contextLimit
+        );
+        
+        for (const msg of history) {
+          conversationHistory.push({
+            role: msg.role === 'assistant' ? 'assistant' : 'user',
+            content: msg.content,
+          });
+        }
+      }
+
+      if (userSettings?.enableVectorSearch && userMessages.length > 0) {
+        const lastUserMessage = userMessages[userMessages.length - 1];
+        const relevantHistory = await getRelevantHistory(
+          lastUserMessage.content,
+          body.conversationId || '',
+          3
+        );
+        
+        if (relevantHistory.length > 0) {
+          conversationHistory.push({
+            role: 'system',
+            content: `[相关历史上下文]\n${relevantHistory.map((m) => `${m.role}: ${m.content}`).join('\n')}`,
+          });
+        }
+      }
+
+      for (const msg of userMessages) {
+        conversationHistory.push({
+          role: msg.role === 'assistant' ? 'assistant' : 'user',
+          content: msg.content,
+        });
+      }
+
+      let iteration = 0;
+      const maxIterations = apiConfig.react.maxIterations;
+
+      await writer.write(
+        encoder.encode(encodeSSE({
+          type: 'thinking',
+          content: `🔄 ReAct 模式启动，已加载 ${tools.length} 个远程工具`,
+        }))
+      );
+
+      while (iteration < maxIterations) {
+        iteration++;
+        console.log(`\n[ReAct] ====== 第 ${iteration}/${maxIterations} 次迭代 ======`);
+
+        await writer.write(
+          encoder.encode(encodeSSE({
+            type: 'thinking',
+            content: `💭 第 ${iteration} 轮思考中...`,
+          }))
+        );
+
+        const llmResponse = await callLLM(conversationHistory, openaiTools, {
+          model: userSettings?.defaultModel,
+          maxTokens: userSettings?.maxTokens,
+          temperature: userSettings?.temperature,
+        });
+
+        console.log(`[ReAct] 🤖 LLM 响应: content=${llmResponse.content?.slice(0, 80) || '(空)'} toolCalls=${llmResponse.toolCalls.length}`);
+
+        if (llmResponse.content) {
+          await writer.write(
+            encoder.encode(encodeSSE({
+              type: 'content',
+              content: llmResponse.content,
+            }))
+          );
+        }
+
+        if (llmResponse.toolCalls.length === 0) {
+          await writer.write(
+            encoder.encode(encodeSSE({
+              type: 'thinking',
+              content: '✅ 思考完成',
+            }))
+          );
+          await writer.write(encoder.encode(encodeSSE({ type: 'done' })));
+          break;
+        }
+
+        await writer.write(
+          encoder.encode(encodeSSE({
+            type: 'thinking',
+            content: `🔧 调用 ${llmResponse.toolCalls.length} 个工具`,
+          }))
+        );
+
+        const assistantMessage: OpenAIMessage = {
+          role: 'assistant',
+          content: llmResponse.content || '',
+          tool_calls: llmResponse.toolCalls.map((tc) => ({
+            id: tc.id,
+            type: 'function' as const,
+            function: {
+              name: tc.name,
+              arguments: JSON.stringify(tc.args),
+            },
+          })),
+        };
+        conversationHistory.push(assistantMessage);
+
+        for (const toolCall of llmResponse.toolCalls) {
+          await writer.write(
+            encoder.encode(encodeSSE({
+              type: 'tool_call',
+              toolCall,
+            }))
+          );
+
+          const cacheKey = `${toolCall.name}:${JSON.stringify(toolCall.args)}`;
+          let result: ToolResult;
+          
+          const cachedResult = await toolCache.get<ToolResult>(cacheKey);
+          if (cachedResult) {
+            console.log(`[Cache] Tool result hit for ${toolCall.name}`);
+            result = { ...cachedResult, cached: true };
+          } else {
+            result = await toolExecutor.execute(toolCall);
+            if (result.status === 'success') {
+              await toolCache.set(cacheKey, result, 86400);
+            }
+          }
+
+          await writer.write(
+            encoder.encode(encodeSSE({
+              type: 'tool_result',
+              result,
+            }))
+          );
+
+          conversationHistory.push({
+            role: 'tool',
+            tool_call_id: toolCall.id,
+            content: toolExecutor.formatResultForLLM(result),
+          });
+        }
+      }
+
+      if (iteration >= maxIterations) {
+        await writer.write(encoder.encode(encodeSSE({ type: 'done' })));
+      }
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+      await writer.write(
+        encoder.encode(encodeSSE({
+          type: 'error',
+          error: errorMessage,
+        }))
+      );
+    } finally {
+      await writer.close();
+    }
+  })();
+
+  return new Response(stream.readable, {
+    headers: {
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache',
+      Connection: 'keep-alive',
+    },
+  });
 }

@@ -18,7 +18,7 @@ export interface McpServer {
 
 export interface Packet {
   id: string;
-  type: '技能' | 'MCP';
+  type: '技能' | 'MCP' | '工具';
   method: string;
   endpoint: string;
   status: number;
@@ -32,4 +32,16 @@ export interface AgentConfig {
   name: string;
   version: string;
   model: string;
+}
+
+export interface Resource {
+  id: string;
+  name: string;
+  type: 'agent' | 'skill' | 'mcp' | 'app' | 'dataset';
+  status: 'draft' | 'testing' | 'published' | 'deprecated';
+  description?: string;
+  endpoint?: string;
+  icon?: string;
+  tags?: string[];
+  ownerName?: string;
 }

@@ -1,0 +1,4 @@
+- [x] 参数清理函数正确实现，能去除 Markdown 反引号、前后空格
+- [x] ToolExecutor.execute 在构造 payload 前调用参数清理
+- [x] 系统提示词包含参数格式要求说明
+- [ ] 测试：LLM 生成带反引号的 URL 参数时，MCP 调用成功
