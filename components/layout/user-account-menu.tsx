@@ -1,6 +1,14 @@
 'use client';
 
-import { useState, useRef, useEffect, useCallback } from 'react';
+import {
+  useState,
+  useRef,
+  useEffect,
+  useCallback,
+  useLayoutEffect,
+  type CSSProperties,
+} from 'react';
+import { createPortal } from 'react-dom';
 import { LogOut, ChevronRight, User } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { UserSettingsForm } from '@/components/settings/user-settings-form';
@@ -20,14 +28,86 @@ export function UserAccountMenu({
   variant,
 }: UserAccountMenuProps) {
   const [open, setOpen] = useState(false);
+  const [mounted, setMounted] = useState(false);
+  const [panelStyle, setPanelStyle] = useState<CSSProperties>({});
   const rootRef = useRef<HTMLDivElement>(null);
+  const panelRef = useRef<HTMLDivElement>(null);
 
   const close = useCallback(() => setOpen(false), []);
 
   useEffect(() => {
+    setMounted(true);
+  }, []);
+
+  const updatePanelPosition = useCallback(() => {
+    if (!open || !rootRef.current) return;
+    const rect = rootRef.current.getBoundingClientRect();
+    const vw = window.innerWidth;
+    const vh = window.innerHeight;
+    const margin = 12;
+    const width = Math.min(520, vw - margin * 2);
+    const gap = 8;
+
+    if (variant === 'full') {
+      // 面板下缘在触发器上缘之上 gap（与原 absolute bottom-full + mb-2 一致）
+      const bottom = vh - rect.top + gap;
+      let left = rect.left;
+      left = Math.max(margin, Math.min(left, vw - width - margin));
+      setPanelStyle({
+        position: 'fixed',
+        left,
+        width,
+        bottom,
+        top: 'auto',
+        right: 'auto',
+        zIndex: 100,
+      });
+    } else {
+      // 与触发器底对齐，默认在右侧；若超出视口则翻到左侧
+      let left = rect.right + gap;
+      const bottom = vh - rect.bottom;
+      if (left + width > vw - margin) {
+        left = rect.left - gap - width;
+      }
+      left = Math.max(margin, Math.min(left, vw - width - margin));
+      setPanelStyle({
+        position: 'fixed',
+        left,
+        width,
+        bottom,
+        top: 'auto',
+        right: 'auto',
+        zIndex: 100,
+      });
+    }
+  }, [open, variant]);
+
+  useLayoutEffect(() => {
+    if (!open) return;
+    updatePanelPosition();
+    const onRelayout = () => updatePanelPosition();
+    window.addEventListener('resize', onRelayout);
+    window.addEventListener('scroll', onRelayout, true);
+    return () => {
+      window.removeEventListener('resize', onRelayout);
+      window.removeEventListener('scroll', onRelayout, true);
+    };
+  }, [open, updatePanelPosition]);
+
+  useEffect(() => {
     if (!open) return;
     const onDoc = (e: MouseEvent) => {
-      if (!rootRef.current?.contains(e.target as Node)) close();
+      const t = e.target as Node;
+      if (rootRef.current?.contains(t) || panelRef.current?.contains(t)) return;
+      // ModelSelect 等通过 Portal 挂到 body，仍属设置面板交互，勿当作「点外部」关窗
+      if (
+        typeof Element !== 'undefined' &&
+        t instanceof Element &&
+        t.closest('[data-nexus-floating-overlay]')
+      ) {
+        return;
+      }
+      close();
     };
     document.addEventListener('mousedown', onDoc);
     return () => document.removeEventListener('mousedown', onDoc);
@@ -53,21 +133,24 @@ export function UserAccountMenu({
     'text-foreground hover:bg-black/[0.04] dark:hover:bg-white/[0.06]'
   );
 
-  const menuPanel = (
-    <div
-      className={cn(
-        panelSurface,
-        'flex max-h-[min(85vh,720px)] w-[min(calc(100vw-1.5rem),520px)] flex-col overflow-hidden',
-        variant === 'full'
-          ? 'absolute bottom-full left-0 z-50 mb-2'
-          : 'absolute bottom-0 left-full z-50 ml-2'
-      )}
-    >
+  /** 挂到 body，避免侧栏父级 overflow-hidden 横向裁切面板 */
+  const menuPanel =
+    open &&
+    mounted &&
+    createPortal(
+      <div
+        ref={panelRef}
+        style={panelStyle}
+        className={cn(
+          panelSurface,
+          'flex max-h-[min(85vh,720px)] flex-col overflow-hidden'
+        )}
+      >
       <div className="shrink-0 border-b border-gpt-border px-4 py-3">
         <p className="truncate text-sm font-semibold text-foreground">{displayName || '用户'}</p>
       </div>
 
-      <div className="min-h-0 flex-1 overflow-y-auto px-3 py-3 scrollbar-none">
+      <div className="flex min-h-0 flex-1 flex-col overflow-hidden px-3 py-3">
         <UserSettingsForm variant="popover" />
       </div>
 
@@ -84,8 +167,9 @@ export function UserAccountMenu({
           退出登录
         </button>
       </div>
-    </div>
-  );
+    </div>,
+      document.body
+    );
 
   if (variant === 'collapsed') {
     return (
@@ -100,7 +184,7 @@ export function UserAccountMenu({
         >
           <User size={20} strokeWidth={2} />
         </button>
-        {open && menuPanel}
+        {menuPanel}
       </div>
     );
   }
@@ -130,7 +214,7 @@ export function UserAccountMenu({
           aria-hidden
         />
       </button>
-      {open && menuPanel}
+      {menuPanel}
     </div>
   );
 }

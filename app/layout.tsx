@@ -20,8 +20,10 @@ const jetbrainsMono = JetBrains_Mono({
 });
 
 export const metadata: Metadata = {
-  title: 'AI Portal Nexus',
-  description: 'Production-grade AI Agent testing and orchestration portal.',
+  title: 'Nexus-Prime',
+  description:
+    'Nexus-Prime：智能 Agent 对话与远程能力编排，与站内品牌一致。',
+  applicationName: 'Nexus-Prime',
 };
 
 export const viewport: Viewport = {

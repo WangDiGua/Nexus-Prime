@@ -16,12 +16,216 @@ const DASHSCOPE_API_KEY = process.env.DASHSCOPE_API_KEY;
 interface OpenAIMessage {
   role: 'system' | 'user' | 'assistant' | 'tool';
   content: string;
+  /** 百炼思考链：多轮工具调用时需回传，见官方「思考模式」文档 */
+  reasoning_content?: string;
   tool_calls?: Array<{
     id: string;
     type: 'function';
     function: { name: string; arguments: string };
   }>;
   tool_call_id?: string;
+}
+
+interface ToolCallAccum {
+  id?: string;
+  name?: string;
+  arguments: string;
+}
+
+function mergeToolCallStreamDeltas(
+  delta: {
+    tool_calls?: Array<{
+      index?: number;
+      id?: string;
+      type?: string;
+      function?: { name?: string; arguments?: string };
+    }>;
+  },
+  toolCallsByIndex: Map<number, ToolCallAccum>
+) {
+  if (!delta.tool_calls?.length) return;
+  for (const tc of delta.tool_calls) {
+    const index = typeof tc.index === 'number' ? tc.index : 0;
+    if (!toolCallsByIndex.has(index)) {
+      toolCallsByIndex.set(index, { arguments: '' });
+    }
+    const acc = toolCallsByIndex.get(index)!;
+    if (tc.id) acc.id = tc.id;
+    if (tc.function?.name) acc.name = tc.function.name;
+    if (tc.function?.arguments) acc.arguments += tc.function.arguments;
+  }
+}
+
+function toolCallsFromStreamAccum(toolCallsByIndex: Map<number, ToolCallAccum>): ToolCall[] {
+  const sorted = [...toolCallsByIndex.entries()].sort((a, b) => a[0] - b[0]);
+  const out: ToolCall[] = [];
+  for (const [, tc] of sorted) {
+    if (!tc.id || !tc.name) continue;
+    let args: Record<string, unknown> = {};
+    try {
+      args = JSON.parse(tc.arguments || '{}');
+    } catch {
+      args = {};
+    }
+    out.push({ id: tc.id, name: tc.name, args });
+  }
+  return out;
+}
+
+/**
+ * 流式调用百炼 OpenAI 兼容接口：转发 reasoning_content → reasoning_delta、content → content。
+ * 思考模式需 stream + enable_thinking；部分模型不支持时会自动降级重试。
+ */
+async function streamDashScopeChatCompletion(
+  messages: OpenAIMessage[],
+  tools: Array<{ type: 'function'; function: { name: string; description: string; parameters: object } }> | undefined,
+  settings: { model?: string; maxTokens?: number; temperature?: number } | undefined,
+  writer: WritableStreamDefaultWriter<Uint8Array>,
+  encoder: TextEncoder,
+  /** 来自请求体或 DASHSCOPE_ENABLE_THINKING 的最终开关 */
+  requestEnableThinking: boolean
+): Promise<{ content: string; reasoning: string; toolCalls: ToolCall[]; finishReason: string }> {
+  const model = settings?.model || process.env.DASHSCOPE_MODEL || 'qwen-plus-latest';
+  let enableThinking = requestEnableThinking;
+
+  const buildBody = (withThinking: boolean): Record<string, unknown> => {
+    const body: Record<string, unknown> = {
+      model,
+      messages,
+      max_tokens: settings?.maxTokens || 4096,
+      temperature: settings?.temperature ?? 0.7,
+      stream: true,
+    };
+    if (withThinking) {
+      body.enable_thinking = true;
+    }
+    if (tools && tools.length > 0) {
+      body.tools = tools;
+      body.tool_choice = 'auto';
+    }
+    return body;
+  };
+
+  const post = (withThinking: boolean) =>
+    fetch(`${DASHSCOPE_BASE_URL}/chat/completions`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${DASHSCOPE_API_KEY}`,
+      },
+      body: JSON.stringify(buildBody(withThinking)),
+    });
+
+  let response = await post(enableThinking);
+  if (!response.ok && enableThinking && response.status === 400) {
+    const errPreview = await response.text();
+    console.warn('[DashScope] Retrying without enable_thinking:', errPreview.slice(0, 300));
+    enableThinking = false;
+    response = await post(false);
+  }
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(`LLM stream error (${response.status}): ${errorText.slice(0, 500)}`);
+  }
+
+  const reader = response.body?.getReader();
+  if (!reader) {
+    throw new Error('LLM stream: empty body');
+  }
+
+  let fullContent = '';
+  let fullReasoning = '';
+  let finishReason = 'stop';
+  const toolCallsByIndex = new Map<number, ToolCallAccum>();
+  const decoder = new TextDecoder();
+  let buffer = '';
+
+  while (true) {
+    const { done, value } = await reader.read();
+    buffer += decoder.decode(value ?? new Uint8Array(), { stream: !done });
+    const lines = buffer.split('\n');
+    buffer = lines.pop() ?? '';
+
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed.startsWith('data: ')) continue;
+      const payload = trimmed.slice(6);
+      if (payload === '[DONE]') continue;
+      try {
+        const json = JSON.parse(payload) as {
+          choices?: Array<{
+            delta?: {
+              content?: string | null;
+              reasoning_content?: string | null;
+              tool_calls?: Array<{
+                index?: number;
+                id?: string;
+                type?: string;
+                function?: { name?: string; arguments?: string };
+              }>;
+            };
+            message?: {
+              tool_calls?: Array<{
+                index?: number;
+                id?: string;
+                type?: string;
+                function?: { name?: string; arguments?: string };
+              }>;
+            };
+            finish_reason?: string | null;
+          }>;
+        };
+        const choice = json.choices?.[0];
+        const delta = choice?.delta;
+        const message = choice?.message;
+        if (choice?.finish_reason) {
+          finishReason = choice.finish_reason;
+        }
+        if (message?.tool_calls?.length && toolCallsByIndex.size === 0) {
+          mergeToolCallStreamDeltas({ tool_calls: message.tool_calls }, toolCallsByIndex);
+        }
+        if (delta?.reasoning_content) {
+          const piece = String(delta.reasoning_content);
+          fullReasoning += piece;
+          await writer.write(
+            encoder.encode(
+              encodeSSE({
+                type: 'reasoning_delta',
+                content: piece,
+              })
+            )
+          );
+        }
+        if (delta?.content) {
+          const piece = String(delta.content);
+          fullContent += piece;
+          await writer.write(
+            encoder.encode(
+              encodeSSE({
+                type: 'content',
+                content: piece,
+              })
+            )
+          );
+        }
+        if (delta) {
+          mergeToolCallStreamDeltas(delta, toolCallsByIndex);
+        }
+      } catch {
+        // 忽略单行解析失败
+      }
+    }
+    if (done) break;
+  }
+
+  const toolCalls = toolCallsFromStreamAccum(toolCallsByIndex);
+  return {
+    content: fullContent,
+    reasoning: fullReasoning,
+    toolCalls,
+    finishReason,
+  };
 }
 
 function encodeSSE(event: ChatSSEEvent): string {
@@ -64,8 +268,13 @@ async function callLLM(
   const model = settings?.model || process.env.DASHSCOPE_MODEL || 'qwen-plus-latest';
   
   const cacheKey = `${model}:${JSON.stringify(messages.slice(-2))}:${tools?.length || 0}`;
-  const cached = await llmCache.get<{ content: string | null; toolCalls: ToolCall[]; finishReason: string }>(cacheKey);
-  
+  let cached: { content: string | null; toolCalls: ToolCall[]; finishReason: string } | null = null;
+  try {
+    cached = await llmCache.get<{ content: string | null; toolCalls: ToolCall[]; finishReason: string }>(cacheKey);
+  } catch (e) {
+    console.warn('[Cache] Redis 不可用，跳过 LLM 读缓存:', e);
+  }
+
   if (cached) {
     console.log('[Cache] LLM response hit');
     return cached;
@@ -124,7 +333,11 @@ async function callLLM(
     finishReason,
   };
 
-  await llmCache.set(cacheKey, result, 3600);
+  try {
+    await llmCache.set(cacheKey, result, 3600);
+  } catch (e) {
+    console.warn('[Cache] Redis 不可用，跳过 LLM 写缓存:', e);
+  }
 
   return result;
 }
@@ -142,6 +355,8 @@ export async function POST(req: NextRequest) {
     conversationId?: string;
     entryResourceType?: string;
     entryResourceId?: string;
+    /** 是否启用百炼思考链（流式 reasoning）；未传则使用环境变量 DASHSCOPE_ENABLE_THINKING */
+    enableThinking?: boolean;
   };
 
   try {
@@ -189,6 +404,11 @@ export async function POST(req: NextRequest) {
   const encoder = new TextEncoder();
   const stream = new TransformStream();
   const writer = stream.writable.getWriter();
+
+  const streamEnableThinking =
+    typeof body.enableThinking === 'boolean'
+      ? body.enableThinking
+      : process.env.DASHSCOPE_ENABLE_THINKING === 'true';
 
   (async () => {
     try {
@@ -305,51 +525,89 @@ export async function POST(req: NextRequest) {
         iteration++;
         console.log(`\n[ReAct] ====== 第 ${iteration}/${maxIterations} 次迭代 ======`);
 
-        await writer.write(
-          encoder.encode(encodeSSE({
-            type: 'thinking',
-            content: `第 ${iteration} 轮思考中…`,
-          }))
-        );
+        let llmResponse: {
+          content: string | null;
+          reasoning: string;
+          toolCalls: ToolCall[];
+          finishReason: string;
+        };
 
-        const llmResponse = await callLLM(conversationHistory, openaiTools, {
-          model: userSettings?.defaultModel,
-          maxTokens: userSettings?.maxTokens,
-          temperature: userSettings?.temperature,
-        });
-
-        console.log(`[ReAct] 🤖 LLM 响应: content=${llmResponse.content?.slice(0, 80) || '(空)'} toolCalls=${llmResponse.toolCalls.length}`);
-
-        if (llmResponse.content) {
-          await writer.write(
-            encoder.encode(encodeSSE({
-              type: 'content',
-              content: llmResponse.content,
-            }))
+        try {
+          llmResponse = await streamDashScopeChatCompletion(
+            conversationHistory,
+            openaiTools,
+            {
+              model: userSettings?.defaultModel,
+              maxTokens: userSettings?.maxTokens,
+              temperature: userSettings?.temperature,
+            },
+            writer,
+            encoder,
+            streamEnableThinking
           );
+        } catch (streamErr) {
+          console.warn('[ReAct] Stream failed, using non-streaming fallback:', streamErr);
+          await writer.write(
+            encoder.encode(
+              encodeSSE({
+                type: 'thinking',
+                content: `第 ${iteration} 轮思考中…`,
+              })
+            )
+          );
+          const fallback = await callLLM(conversationHistory, openaiTools, {
+            model: userSettings?.defaultModel,
+            maxTokens: userSettings?.maxTokens,
+            temperature: userSettings?.temperature,
+          });
+          llmResponse = {
+            content: fallback.content,
+            reasoning: '',
+            toolCalls: fallback.toolCalls,
+            finishReason: fallback.finishReason,
+          };
+          if (fallback.content) {
+            await writer.write(
+              encoder.encode(
+                encodeSSE({
+                  type: 'content',
+                  content: fallback.content,
+                })
+              )
+            );
+          }
         }
+
+        console.log(
+          `[ReAct] 🤖 LLM 响应: content=${llmResponse.content?.slice(0, 80) || '(空)'} toolCalls=${llmResponse.toolCalls.length}`
+        );
 
         if (llmResponse.toolCalls.length === 0) {
           await writer.write(
-            encoder.encode(encodeSSE({
-              type: 'thinking',
-              content: '思考完成',
-            }))
+            encoder.encode(
+              encodeSSE({
+                type: 'thinking',
+                content: '思考完成',
+              })
+            )
           );
           await writer.write(encoder.encode(encodeSSE({ type: 'done' })));
           break;
         }
 
         await writer.write(
-          encoder.encode(encodeSSE({
-            type: 'thinking',
-            content: `调用 ${llmResponse.toolCalls.length} 个工具`,
-          }))
+          encoder.encode(
+            encodeSSE({
+              type: 'thinking',
+              content: `调用 ${llmResponse.toolCalls.length} 个工具`,
+            })
+          )
         );
 
         const assistantMessage: OpenAIMessage = {
           role: 'assistant',
           content: llmResponse.content || '',
+          ...(llmResponse.reasoning ? { reasoning_content: llmResponse.reasoning } : {}),
           tool_calls: llmResponse.toolCalls.map((tc) => ({
             id: tc.id,
             type: 'function' as const,
@@ -371,15 +629,24 @@ export async function POST(req: NextRequest) {
 
           const cacheKey = `${toolCall.name}:${JSON.stringify(toolCall.args)}`;
           let result: ToolResult;
-          
-          const cachedResult = await toolCache.get<ToolResult>(cacheKey);
+
+          let cachedResult: ToolResult | null = null;
+          try {
+            cachedResult = await toolCache.get<ToolResult>(cacheKey);
+          } catch (e) {
+            console.warn('[Cache] Redis 不可用，跳过工具读缓存:', e);
+          }
           if (cachedResult) {
             console.log(`[Cache] Tool result hit for ${toolCall.name}`);
             result = { ...cachedResult, cached: true };
           } else {
             result = await toolExecutor.execute(toolCall);
             if (result.status === 'success') {
-              await toolCache.set(cacheKey, result, 86400);
+              try {
+                await toolCache.set(cacheKey, result, 86400);
+              } catch (e) {
+                console.warn('[Cache] Redis 不可用，跳过工具写缓存:', e);
+              }
             }
           }
 

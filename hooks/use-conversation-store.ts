@@ -38,7 +38,13 @@ interface ConversationState {
   activeConversationId: string | null;
   messages: Message[];
   isLoading: boolean;
-  
+  /**
+   * 仅用于触发侧栏会话列表重新拉取，不持久化。
+   * NexusChat 新建会话 / 消息落库后 bump，ConversationList 订阅并 refetch。
+   */
+  conversationListNonce: number;
+  bumpConversationList: () => void;
+
   setActiveConversation: (id: string | null) => void;
   setMessages: (messages: Message[]) => void;
   addMessage: (message: Message) => void;
@@ -52,6 +58,11 @@ export const useConversationStore = create<ConversationState>()(
       activeConversationId: null,
       messages: [],
       isLoading: false,
+      conversationListNonce: 0,
+      bumpConversationList: () =>
+        set((s) => ({
+          conversationListNonce: s.conversationListNonce + 1,
+        })),
 
       setActiveConversation: (id) => set({ activeConversationId: id }),
       setMessages: (messages) => set({ messages }),

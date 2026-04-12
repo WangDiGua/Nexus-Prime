@@ -26,7 +26,7 @@ export const useRegistryStore = create<RegistryState>((set) => ({
   contextTokens: 1240,
   contextContent: {
     file: "README.md",
-    content: "AI Portal Nexus v2.0...",
+    content: "Nexus-Prime v2.0...",
     mcp_source: "文件服务器-MCP"
   },
 

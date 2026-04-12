@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { 
   MessageSquare, 
   Plus, 
@@ -13,6 +13,7 @@ import { motion, AnimatePresence } from 'motion/react';
 import { cn } from '@/lib/utils';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { toast } from '@/lib/toast';
+import { useConversationStore } from '@/hooks/use-conversation-store';
 
 export interface Conversation {
   id: string;
@@ -45,7 +46,10 @@ export default function ConversationList({
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [searchQuery, setSearchQuery] = useState('');
+  const searchQueryRef = useRef(searchQuery);
+  searchQueryRef.current = searchQuery;
   const [showDeleteConfirm, setShowDeleteConfirm] = useState<string | null>(null);
+  const conversationListNonce = useConversationStore((s) => s.conversationListNonce);
 
   useEffect(() => {
     if (!authenticated) {
@@ -53,8 +57,25 @@ export default function ConversationList({
       setIsLoading(false);
       return;
     }
-    fetchConversations();
-  }, [authenticated]);
+    const q = searchQueryRef.current.trim();
+    void (async () => {
+      try {
+        setIsLoading(true);
+        const url = q
+          ? `/api/conversations?search=${encodeURIComponent(q)}`
+          : '/api/conversations';
+        const response = await fetch(url);
+        if (response.ok) {
+          const data = await response.json();
+          setConversations(data.conversations || []);
+        }
+      } catch (error) {
+        console.error('Failed to fetch conversations:', error);
+      } finally {
+        setIsLoading(false);
+      }
+    })();
+  }, [authenticated, conversationListNonce]);
 
   const fetchConversations = async () => {
     try {

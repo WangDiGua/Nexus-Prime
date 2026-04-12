@@ -119,6 +119,7 @@ export function ModelSelect({
   const listbox = open && (
     <div
       ref={panelRef}
+      data-nexus-floating-overlay
       role="listbox"
       aria-activedescendant={value}
       style={{

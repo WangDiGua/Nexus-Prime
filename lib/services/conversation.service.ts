@@ -49,12 +49,15 @@ export class ConversationService {
     const user = await getAuthUser();
     if (!user) throw new Error('Unauthorized');
 
+    const now = new Date();
     return prisma.conversation.create({
       data: {
         userId: user.userId,
         title: data.title,
         summary: data.summary,
         metadata: toJson(data.metadata) || {},
+        /** 与 createdAt 对齐，避免 lastMessageAt 为 null 时在列表排序中沉到底部 */
+        lastMessageAt: now,
       },
     });
   }
@@ -99,7 +102,7 @@ export class ConversationService {
     const [conversations, total] = await Promise.all([
       prisma.conversation.findMany({
         where: { userId: user.userId },
-        orderBy: { lastMessageAt: 'desc' },
+        orderBy: [{ lastMessageAt: 'desc' }, { createdAt: 'desc' }],
         take: limit,
         skip: offset,
       }),
@@ -108,7 +111,14 @@ export class ConversationService {
       }),
     ]);
 
-    return { conversations, total };
+    /** lastMessageAt 为 null 的旧数据在部分库上排序会沉底，用 createdAt 兜底 */
+    const sorted = [...conversations].sort((a, b) => {
+      const ta = a.lastMessageAt?.getTime() ?? a.createdAt.getTime();
+      const tb = b.lastMessageAt?.getTime() ?? b.createdAt.getTime();
+      return tb - ta;
+    });
+
+    return { conversations: sorted, total };
   }
 
   async update(id: string, data: UpdateConversationData) {
@@ -196,11 +206,15 @@ export class ConversationService {
           { summary: { contains: query } },
         ],
       },
-      orderBy: { updatedAt: 'desc' },
+      orderBy: [{ lastMessageAt: 'desc' }, { createdAt: 'desc' }],
       take: limit,
     });
 
-    return conversations;
+    return [...conversations].sort((a, b) => {
+      const ta = a.lastMessageAt?.getTime() ?? a.createdAt.getTime();
+      const tb = b.lastMessageAt?.getTime() ?? b.createdAt.getTime();
+      return tb - ta;
+    });
   }
 }
 

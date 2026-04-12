@@ -42,6 +42,12 @@ export interface ThinkingEvent {
   content: string;
 }
 
+/** 百炼 / OpenAI 兼容流式接口中 delta.reasoning_content 的增量片段 */
+export interface ReasoningDeltaEvent {
+  type: 'reasoning_delta';
+  content: string;
+}
+
 export interface ToolCallEvent {
   type: 'tool_call';
   toolCall: ToolCall;
@@ -66,4 +72,11 @@ export interface DoneEvent {
   type: 'done';
 }
 
-export type ChatSSEEvent = ThinkingEvent | ToolCallEvent | ToolResultEvent | ContentEvent | ErrorEvent | DoneEvent;
+export type ChatSSEEvent =
+  | ThinkingEvent
+  | ReasoningDeltaEvent
+  | ToolCallEvent
+  | ToolResultEvent
+  | ContentEvent
+  | ErrorEvent
+  | DoneEvent;

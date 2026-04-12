@@ -18,6 +18,7 @@ import {
   LogIn,
 } from 'lucide-react';
 import { NexusLogo } from '@/components/ui/nexus-logo';
+import { nexusPixelLogo } from '@/lib/fonts/pixel-logo';
 import { motion, AnimatePresence } from 'motion/react';
 import { useQuery } from '@tanstack/react-query';
 import { cn } from '@/lib/utils';
@@ -70,7 +71,7 @@ export default function CapabilityHub({
   const [triggerResult, setTriggerResult] = useState<any>(null);
   const [activeTab, setActiveTab] = useState<TabType>('conversations');
   const { user, isAuthenticated, isReady, openLogin } = useAuth();
-  const { addPacket, config } = useRegistryStore();
+  const { addPacket } = useRegistryStore();
   const { activeConversationId, setActiveConversation, clearMessages } = useConversationStore();
 
   const { data, isLoading, refetch, isFetching } = useQuery({
@@ -148,8 +149,8 @@ export default function CapabilityHub({
         <aside className={cn(sidebarClass, 'w-full items-center py-3 gap-1')}>
           <div
             className="flex h-10 w-10 shrink-0 items-center justify-center text-foreground"
-            title={config.name}
-            aria-label={config.name}
+            title="Nexus-Prime"
+            aria-label="Nexus-Prime"
           >
             <NexusLogo showText={false} size="sm" />
           </div>
@@ -226,10 +227,16 @@ export default function CapabilityHub({
 
   return (
     <aside className={cn(sidebarClass, 'w-full')}>
-      <div className="flex h-14 shrink-0 items-center justify-between px-3">
-        <div className="flex min-w-0 items-center gap-2">
-          <NexusLogo showText={false} size="sm" />
-          <span className="truncate text-sm font-semibold text-foreground">{config.name}</span>
+      <div className="flex h-14 shrink-0 items-center justify-between gap-2 px-3">
+        <div className="min-w-0 flex-1">
+          <span
+            className={cn(
+              nexusPixelLogo.className,
+              'block truncate text-[1.15rem] leading-tight tracking-[-0.5px] text-foreground [-webkit-font-smoothing:antialiased]',
+            )}
+          >
+            Nexus-Prime
+          </span>
         </div>
         <TooltipProvider>
           <Tooltip>

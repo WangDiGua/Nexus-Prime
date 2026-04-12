@@ -4,6 +4,7 @@ import React, { useRef, useEffect, useState, useCallback, useMemo } from 'react'
 import {
   ArrowUp,
   PanelLeft,
+  Sparkles,
   Square,
 } from 'lucide-react';
 import {
@@ -13,11 +14,15 @@ import {
   cleanThinkingLogForDisplay,
   computeThinkingStepRingState,
   formatThinkingStepMs,
+  reasoningRoundIndexInList,
   thinkingLogRowTextClass,
 } from '@/components/chat/thinking-log-line';
 import ChatMessage from '@/components/chat/ChatMessage';
 import { ModelSelect } from '@/components/ui/model-select';
-import { buildChatModelOptions } from '@/lib/chat-model-options';
+import {
+  buildChatModelOptions,
+  normalizeChatModelId,
+} from '@/lib/chat-model-options';
 import { cn } from '@/lib/utils';
 import { useAuth } from '@/components/auth/auth-provider';
 import { toast } from '@/lib/toast';
@@ -114,6 +119,8 @@ function ThinkingTrace({
 }) {
   /** 加载结束后可手动展开；加载中强制展开 */
   const [expandedAfterDone, setExpandedAfterDone] = useState(false);
+  /** 已完成步骤：默认单行收起，点击展开全文 */
+  const [expandedSteps, setExpandedSteps] = useState<Record<number, boolean>>({});
   const [liveLastMs, setLiveLastMs] = useState(0);
   const lastStepStartRef = useRef(0);
 
@@ -168,7 +175,10 @@ function ThinkingTrace({
           已思考
         </span>
         <svg
-          className={cn('h-3 w-3 shrink-0 transition-transform', showDetail && 'rotate-180')}
+          className={cn(
+            'h-3 w-3 shrink-0 transition-transform duration-300 ease-[cubic-bezier(0.4,0,0.2,1)]',
+            showDetail && 'rotate-180',
+          )}
           fill="none"
           viewBox="0 0 24 24"
           stroke="currentColor"
@@ -177,8 +187,20 @@ function ThinkingTrace({
           <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
         </svg>
       </button>
-      {showDetail && (
-        <div className="mt-2 max-h-60 space-y-2 overflow-y-auto scroll-smooth rounded-xl border border-gpt-border bg-[#f4f4f4] p-3 scrollbar-none dark:bg-[#2f2f2f]">
+      <div
+        className={cn(
+          'grid transition-[grid-template-rows] duration-300 ease-[cubic-bezier(0.4,0,0.2,1)] motion-reduce:transition-none motion-reduce:duration-0',
+          showDetail ? 'grid-rows-[1fr]' : 'grid-rows-[0fr]',
+        )}
+        aria-hidden={!showDetail}
+      >
+        <div
+          className={cn(
+            'min-h-0 overflow-hidden',
+            !showDetail && 'pointer-events-none',
+          )}
+        >
+          <div className="mt-2 space-y-2 rounded-xl border border-gpt-border bg-[#f4f4f4] p-3 dark:bg-[#2f2f2f]">
           {logs.length === 0 && isLoading && (
             <div className="rounded-lg border border-border bg-background px-3 py-2.5">
               <p className="mb-1 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
@@ -221,19 +243,59 @@ function ThinkingTrace({
               (isLoading &&
                 logs.length > 0 &&
                 origIdx === completedLogs.length - 1);
+            const stepDone = Boolean(hasSavedDuration);
+            const stepExpanded = expandedSteps[origIdx] === true;
+            const showCollapsedBody = stepDone && !stepExpanded;
+            const isReasoning = kind === 'reasoning';
+            const reasoningRound = isReasoning
+              ? reasoningRoundIndexInList(completedLogs, origIdx)
+              : 0;
+            const showCollapsedReasoningTitle =
+              showCollapsedBody && isReasoning && stepDone;
             return (
               <div
                 key={origIdx}
                 className={cn(
-                  'flex items-stretch gap-2.5 rounded px-2 py-1 font-mono text-xs',
+                  'flex items-start gap-2.5 rounded px-2 py-1 text-xs',
+                  kind === 'reasoning' ? 'font-sans' : 'font-mono',
                   thinkingLogRowTextClass(kind),
+                  stepDone &&
+                    'cursor-pointer rounded-md transition-colors hover:bg-muted/45',
                 )}
+                role={stepDone ? 'button' : undefined}
+                tabIndex={stepDone ? 0 : undefined}
+                aria-expanded={stepDone ? stepExpanded : undefined}
+                onClick={
+                  stepDone
+                    ? () =>
+                        setExpandedSteps((prev) => ({
+                          ...prev,
+                          [origIdx]: !prev[origIdx],
+                        }))
+                    : undefined
+                }
+                onKeyDown={
+                  stepDone
+                    ? (e) => {
+                        if (e.key === 'Enter' || e.key === ' ') {
+                          e.preventDefault();
+                          setExpandedSteps((prev) => ({
+                            ...prev,
+                            [origIdx]: !prev[origIdx],
+                          }));
+                        }
+                      }
+                    : undefined
+                }
               >
                 <div className="flex w-5 shrink-0 flex-col items-center self-stretch">
-                  <ThinkingStepRing
-                    state={ringState}
-                    className="mt-0.5 shrink-0"
-                  />
+                  <div className="flex h-5 w-full shrink-0 items-center justify-center">
+                    <ThinkingStepRing
+                      state={ringState}
+                      variant={kind === 'reasoning' ? 'reasoning' : 'default'}
+                      className="shrink-0"
+                    />
+                  </div>
                   {showConnectorBelow && (
                     <div
                       className="mb-[-0.5rem] mt-0 min-h-[0.5rem] w-px flex-1 bg-border/80"
@@ -241,9 +303,19 @@ function ThinkingTrace({
                     />
                   )}
                 </div>
-                <span className="min-w-0 flex-1 break-words leading-snug">{text}</span>
+                <span
+                  className={cn(
+                    'min-w-0 flex-1 break-words leading-5',
+                    showCollapsedBody && !showCollapsedReasoningTitle && 'line-clamp-1',
+                  )}
+                  title={showCollapsedReasoningTitle ? text : undefined}
+                >
+                  {showCollapsedReasoningTitle
+                    ? `第 ${reasoningRound} 轮思考`
+                    : text}
+                </span>
                 {durationMs !== undefined && (
-                  <span className="ml-1 shrink-0 tabular-nums text-muted-foreground">
+                  <span className="ml-1 shrink-0 self-start pt-0 tabular-nums leading-5 text-muted-foreground">
                     {formatThinkingStepMs(durationMs)}
                   </span>
                 )}
@@ -270,18 +342,27 @@ function ThinkingTrace({
                 <p className="mb-1.5 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
                   当前思考
                 </p>
-                <div className="flex items-stretch gap-2.5 font-mono text-xs">
-                  <div className="flex w-5 shrink-0 flex-col items-center self-stretch">
-                    <ThinkingStepRing
-                      state="active"
-                      className="mt-0.5 shrink-0"
-                    />
+                <div
+                  className={cn(
+                    'flex items-start gap-2.5 text-xs',
+                    kind === 'reasoning' ? 'font-sans' : 'font-mono',
+                  )}
+                >
+                  <div
+                    className="flex h-5 w-9 shrink-0 items-center justify-center"
+                    aria-hidden
+                  >
+                    <div className="flex items-center gap-1">
+                      <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-primary/45 [animation-delay:-0.3s]" />
+                      <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-primary/45 [animation-delay:-0.15s]" />
+                      <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-primary/45" />
+                    </div>
                   </div>
-                  <span className="min-w-0 flex-1 break-words leading-relaxed">
+                  <span className="min-w-0 flex-1 break-words leading-5">
                     {text}
                   </span>
                   {durationMs !== undefined && (
-                    <span className="ml-1 shrink-0 tabular-nums text-muted-foreground">
+                    <span className="ml-1 shrink-0 self-start tabular-nums leading-5 text-muted-foreground">
                       {formatThinkingStepMs(durationMs)}
                     </span>
                   )}
@@ -289,8 +370,56 @@ function ThinkingTrace({
               </div>
             );
           })()}
+          </div>
         </div>
-      )}
+      </div>
+    </div>
+  );
+}
+
+/** 未开思考模式时：首包前在左侧显示三点，避免空白像卡死 */
+function AssistantStreamDots() {
+  return (
+    <div
+      className="mx-auto flex w-full max-w-3xl animate-ios-fade-in justify-start"
+      aria-busy="true"
+      aria-live="polite"
+    >
+      <div className="flex items-center gap-1 py-2 pl-0.5">
+        <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-primary/45 [animation-delay:-0.3s]" />
+        <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-primary/45 [animation-delay:-0.15s]" />
+        <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-primary/45" />
+      </div>
+    </div>
+  );
+}
+
+/** 会话区与输入条骨架：避免「恢复会话」与「请登录」文案同时出现 */
+function ChatShellSkeleton() {
+  return (
+    <div className="flex min-h-0 flex-1 flex-col" aria-busy="true" aria-label="加载中">
+      <div className="min-h-0 flex-1 space-y-6 overflow-hidden px-3 py-4 sm:px-4">
+        <div className="mx-auto w-full max-w-3xl space-y-6">
+          <div className="flex justify-end">
+            <div className="h-9 w-[min(66%,18rem)] rounded-2xl bg-muted/50 motion-safe:animate-pulse" />
+          </div>
+          <div className="flex justify-start">
+            <div className="h-24 w-[min(78%,22rem)] rounded-2xl bg-muted/40 motion-safe:animate-pulse" />
+          </div>
+          <div className="flex justify-end">
+            <div className="h-9 w-[min(55%,14rem)] rounded-2xl bg-muted/50 motion-safe:animate-pulse" />
+          </div>
+        </div>
+      </div>
+      <div className="shrink-0 px-3 pt-2 sm:px-4 pb-safe-composer">
+        <div className="relative mx-auto w-full max-w-3xl">
+          <div className="flex h-[52px] items-center gap-2 rounded-[1.75rem] border border-gpt-border/80 bg-gpt-composer px-2 py-2 pl-2.5">
+            <div className="h-8 w-9 shrink-0 rounded-full bg-muted/60 motion-safe:animate-pulse" />
+            <div className="h-8 min-w-0 flex-1 rounded-xl bg-muted/60 motion-safe:animate-pulse" />
+            <div className="h-10 w-10 shrink-0 rounded-full bg-muted/60 motion-safe:animate-pulse" />
+          </div>
+        </div>
+      </div>
     </div>
   );
 }
@@ -302,11 +431,12 @@ export default function NexusChat({
   const { isAuthenticated, isReady, openLogin } = useAuth();
   const canChat = isReady && isAuthenticated;
   const { addPacket, updateContext, config, updateConfig } = useRegistryStore();
-  const { 
-    activeConversationId, 
-    messages: storedMessages, 
+  const {
+    activeConversationId,
+    messages: storedMessages,
     setMessages: setStoredMessages,
-    setActiveConversation 
+    setActiveConversation,
+    bumpConversationList,
   } = useConversationStore();
   
   const [localMessages, setLocalMessages] = useState<Message[]>([]);
@@ -365,14 +495,38 @@ export default function NexusChat({
   );
 
   const resolvedModelValue = useMemo(() => {
-    const known = chatModelOptions.some((o) => o.value === config.model);
-    return known ? config.model! : chatModelOptions[0]?.value ?? '';
+    const raw = config.model;
+    const normalized = normalizeChatModelId(raw) ?? raw;
+    const known = chatModelOptions.some((o) => o.value === normalized);
+    return known ? normalized! : chatModelOptions[0]?.value ?? '';
   }, [chatModelOptions, config.model]);
 
   /** 当前这次请求对应的助手消息 id（首包 SSE 前已插入占位，避免误用「上一条助手」） */
   const [streamingAssistantId, setStreamingAssistantId] = useState<string | null>(
     null,
   );
+
+  /** 是否向百炼请求思考链（reasoning）；持久化到 localStorage */
+  const [thinkingModeEnabled, setThinkingModeEnabled] = useState(false);
+  useEffect(() => {
+    try {
+      if (window.localStorage.getItem('nexus-prime:thinking-mode') === 'true') {
+        setThinkingModeEnabled(true);
+      }
+    } catch {
+      /* ignore */
+    }
+  }, []);
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(
+        'nexus-prime:thinking-mode',
+        thinkingModeEnabled ? 'true' : 'false'
+      );
+    } catch {
+      /* ignore */
+    }
+  }, [thinkingModeEnabled]);
 
   const prevActiveConversationId = useRef<string | null>(activeConversationId);
   /** 仅用于恢复拉取：首帧为 null，便于在「刷新 / 首次进入带 id」时与当前 id 比较为已变化，从而必定请求服务端 */
@@ -533,7 +687,9 @@ export default function NexusChat({
     conversationId: string,
     thinkingLog?: string[],
     thinkingStepDurationsMs?: number[],
-    tokensUsed?: number
+    tokensUsed?: number,
+    /** 当前轮次使用的模型 id（与头部 ModelSelect / 服务端 chat 一致） */
+    model?: string
   ) => {
     try {
       const response = await fetch(`/api/conversations/${conversationId}/messages`, {
@@ -548,6 +704,7 @@ export default function NexusChat({
               ? thinkingStepDurationsMs
               : null,
           tokensUsed: tokensUsed || 0,
+          ...(model ? { model } : {}),
         }),
       });
       if (!response.ok) {
@@ -580,19 +737,29 @@ export default function NexusChat({
       apiMessages: { role: string; content: string }[];
       conversationId: string | null;
       controller: AbortController;
+      enableThinking: boolean;
     }) => {
       const {
         assistantMessageId,
         apiMessages,
         conversationId: currentConversationId,
         controller,
+        enableThinking,
       } = params;
+
+      /** 未开启「思考」时不展示/不落库 ReAct 思维链（仍走工具调用与正文流） */
+      const collectThinkingUi = enableThinking;
+
+      /** 本轮请求对应的模型（与头部选择器一致，供落库） */
+      const modelForThisTurn = resolvedModelValue;
 
       let currentContent = '';
       let currentToolInvocations: Message['toolInvocations'] = [];
       let currentThinkingLog: string[] = [];
       let currentThinkingDurationsMs: number[] = [];
       let thinkingStepStartedAt = Date.now();
+      /** 是否处于同一轮「模型思考」流式片段中（reasoning_delta） */
+      let reasoningDeltaOpen = false;
 
       const finalizeLastThinkingStep = () => {
         const now = Date.now();
@@ -611,6 +778,7 @@ export default function NexusChat({
           body: JSON.stringify({
             conversationId: currentConversationId,
             messages: apiMessages,
+            enableThinking,
           }),
           signal: controller.signal,
         });
@@ -641,7 +809,54 @@ export default function NexusChat({
                 const event = JSON.parse(line.slice(6)) as ChatSSEEvent;
 
                 switch (event.type) {
+                  case 'reasoning_delta': {
+                    if (!collectThinkingUi) break;
+                    const now = Date.now();
+                    if (!reasoningDeltaOpen) {
+                      reasoningDeltaOpen = true;
+                      if (currentThinkingLog.length > 0) {
+                        const prevIdx = currentThinkingLog.length - 1;
+                        currentThinkingDurationsMs[prevIdx] = now - thinkingStepStartedAt;
+                      }
+                      currentThinkingLog.push(event.content);
+                      thinkingStepStartedAt = now;
+                    } else {
+                      const lastIdx = currentThinkingLog.length - 1;
+                      if (lastIdx >= 0) {
+                        currentThinkingLog[lastIdx] =
+                          (currentThinkingLog[lastIdx] || '') + event.content;
+                      }
+                    }
+                    setLocalMessages(prev => {
+                      const existing = prev.find(m => m.id === assistantMessageId);
+                      if (existing) {
+                        return prev.map(m =>
+                          m.id === assistantMessageId
+                            ? {
+                                ...m,
+                                content: currentContent,
+                                toolInvocations: currentToolInvocations,
+                                thinkingLog: [...currentThinkingLog],
+                                thinkingStepDurationsMs: [...currentThinkingDurationsMs],
+                              }
+                            : m
+                        );
+                      }
+                      return [...prev, {
+                        id: assistantMessageId,
+                        role: 'assistant',
+                        content: currentContent,
+                        toolInvocations: currentToolInvocations,
+                        thinkingLog: [...currentThinkingLog],
+                        thinkingStepDurationsMs: [...currentThinkingDurationsMs],
+                      }];
+                    });
+                    break;
+                  }
+
                   case 'thinking': {
+                    if (!collectThinkingUi) break;
+                    reasoningDeltaOpen = false;
                     const now = Date.now();
                     if (currentThinkingLog.length > 0) {
                       const prevIdx = currentThinkingLog.length - 1;
@@ -676,7 +891,16 @@ export default function NexusChat({
                     break;
                   }
 
-                  case 'content':
+                  case 'content': {
+                    if (reasoningDeltaOpen) {
+                      reasoningDeltaOpen = false;
+                      const now = Date.now();
+                      if (currentThinkingLog.length > 0) {
+                        const prevIdx = currentThinkingLog.length - 1;
+                        currentThinkingDurationsMs[prevIdx] = now - thinkingStepStartedAt;
+                      }
+                      thinkingStepStartedAt = now;
+                    }
                     currentContent += event.content;
                     setLocalMessages(prev => {
                       const existing = prev.find(m => m.id === assistantMessageId);
@@ -703,8 +927,18 @@ export default function NexusChat({
                       }];
                     });
                     break;
+                  }
 
                   case 'tool_call': {
+                    if (reasoningDeltaOpen) {
+                      reasoningDeltaOpen = false;
+                      const now = Date.now();
+                      if (currentThinkingLog.length > 0) {
+                        const prevIdx = currentThinkingLog.length - 1;
+                        currentThinkingDurationsMs[prevIdx] = now - thinkingStepStartedAt;
+                      }
+                      thinkingStepStartedAt = now;
+                    }
                     const toolCall = event.toolCall;
                     currentToolInvocations.push({
                       toolCallId: toolCall.id,
@@ -815,7 +1049,64 @@ export default function NexusChat({
         if (sseLineBuffer.startsWith('data: ')) {
           try {
             const event = JSON.parse(sseLineBuffer.slice(6)) as ChatSSEEvent;
-            if (event.type === 'content' && event.content) {
+            if (
+              collectThinkingUi &&
+              event.type === 'reasoning_delta' &&
+              event.content
+            ) {
+              const now = Date.now();
+              if (!reasoningDeltaOpen) {
+                reasoningDeltaOpen = true;
+                if (currentThinkingLog.length > 0) {
+                  const prevIdx = currentThinkingLog.length - 1;
+                  currentThinkingDurationsMs[prevIdx] = now - thinkingStepStartedAt;
+                }
+                currentThinkingLog.push(event.content);
+                thinkingStepStartedAt = now;
+              } else {
+                const lastIdx = currentThinkingLog.length - 1;
+                if (lastIdx >= 0) {
+                  currentThinkingLog[lastIdx] =
+                    (currentThinkingLog[lastIdx] || '') + event.content;
+                }
+              }
+              setLocalMessages((prev) => {
+                const existing = prev.find((m) => m.id === assistantMessageId);
+                if (existing) {
+                  return prev.map((m) =>
+                    m.id === assistantMessageId
+                      ? {
+                          ...m,
+                          content: currentContent,
+                          toolInvocations: currentToolInvocations,
+                          thinkingLog: [...currentThinkingLog],
+                          thinkingStepDurationsMs: [...currentThinkingDurationsMs],
+                        }
+                      : m
+                  );
+                }
+                return [
+                  ...prev,
+                  {
+                    id: assistantMessageId,
+                    role: 'assistant' as const,
+                    content: currentContent,
+                    toolInvocations: currentToolInvocations,
+                    thinkingLog: [...currentThinkingLog],
+                    thinkingStepDurationsMs: [...currentThinkingDurationsMs],
+                  },
+                ];
+              });
+            } else if (event.type === 'content' && event.content) {
+              if (reasoningDeltaOpen) {
+                reasoningDeltaOpen = false;
+                const now = Date.now();
+                if (currentThinkingLog.length > 0) {
+                  const prevIdx = currentThinkingLog.length - 1;
+                  currentThinkingDurationsMs[prevIdx] = now - thinkingStepStartedAt;
+                }
+                thinkingStepStartedAt = now;
+              }
               currentContent += event.content;
               setLocalMessages((prev) => {
                 const existing = prev.find((m) => m.id === assistantMessageId);
@@ -875,6 +1166,8 @@ export default function NexusChat({
             currentConversationId,
             currentThinkingLog,
             currentThinkingDurationsMs,
+            undefined,
+            modelForThisTurn,
           );
           if (!ok) {
             console.warn(
@@ -895,9 +1188,19 @@ export default function NexusChat({
         setIsLoading(false);
         setStreamingAssistantId(null);
         setAbortController(null);
+        if (currentConversationId) {
+          bumpConversationList();
+        }
       }
     },
-    [saveMessageToDB, addPacket, updateContext, toast],
+    [
+      saveMessageToDB,
+      addPacket,
+      updateContext,
+      toast,
+      resolvedModelValue,
+      bumpConversationList,
+    ],
   );
 
   const handleCopyAssistant = useCallback(async (text: string) => {
@@ -953,6 +1256,7 @@ export default function NexusChat({
         apiMessages,
         conversationId: activeConversationId,
         controller,
+        enableThinking: thinkingModeEnabled,
       });
     },
     [
@@ -962,6 +1266,7 @@ export default function NexusChat({
       localMessages,
       activeConversationId,
       runAssistantStream,
+      thinkingModeEnabled,
     ],
   );
 
@@ -1011,6 +1316,7 @@ export default function NexusChat({
           const conversation = await createResponse.json();
           currentConversationId = conversation.id;
           setActiveConversation(currentConversationId);
+          bumpConversationList();
         }
       } catch (error) {
         console.error('Failed to create conversation:', error);
@@ -1018,7 +1324,15 @@ export default function NexusChat({
     }
 
     if (currentConversationId) {
-      await saveMessageToDB('USER', userMessage.content, currentConversationId);
+      await saveMessageToDB(
+        'USER',
+        userMessage.content,
+        currentConversationId,
+        undefined,
+        undefined,
+        undefined,
+        resolvedModelValue,
+      );
     }
     await runAssistantStream({
       assistantMessageId,
@@ -1031,6 +1345,7 @@ export default function NexusChat({
       ],
       conversationId: currentConversationId,
       controller,
+      enableThinking: thinkingModeEnabled,
     });
   };
 
@@ -1043,8 +1358,11 @@ export default function NexusChat({
       (m) => m.role === 'assistant' && m.id === streamingAssistantId,
     );
 
-  const showRestoreLoading =
-    !persistHydrated || (Boolean(activeConversationId) && messagesRestoring);
+  /** 含 auth 未就绪：避免未登录占位与会话恢复提示同时出现 */
+  const shellLoading =
+    !isReady ||
+    !persistHydrated ||
+    (Boolean(activeConversationId) && messagesRestoring);
 
   const typingIndicator = showTypingIndicator ? (
     <div className="mx-auto flex w-full max-w-3xl animate-ios-fade-in">
@@ -1063,9 +1381,31 @@ export default function NexusChat({
     <form onSubmit={handleSubmit} className="relative mx-auto w-full max-w-3xl">
       <div
         className={cn(
-          'flex items-center gap-2 rounded-[1.75rem] border border-gpt-border bg-gpt-composer px-3 py-2 shadow-sm transition-shadow focus-within:shadow-md focus-within:ring-2 focus-within:ring-primary/20'
+          'flex items-center gap-2 rounded-[1.75rem] border border-gpt-border bg-gpt-composer px-2 py-2 pl-2.5 shadow-sm transition-shadow focus-within:shadow-md focus-within:ring-2 focus-within:ring-primary/20 sm:gap-2.5'
         )}
       >
+        <button
+          type="button"
+          onClick={() => setThinkingModeEnabled((v) => !v)}
+          disabled={!canChat || isLoading}
+          aria-pressed={thinkingModeEnabled}
+          title={
+            thinkingModeEnabled
+              ? '思考模式已开：会展示推理过程，响应更慢'
+              : '点击开启思考模式（展示推理，响应更慢）'
+          }
+          className={cn(
+            'flex h-10 shrink-0 items-center gap-1 rounded-full px-2 text-xs font-medium transition-colors sm:px-2.5',
+            !canChat || isLoading
+              ? 'cursor-not-allowed opacity-40'
+              : thinkingModeEnabled
+                ? 'bg-primary/15 text-primary hover:bg-primary/20'
+                : 'text-muted-foreground hover:bg-muted/70'
+          )}
+        >
+          <Sparkles className="size-4 shrink-0" aria-hidden />
+          <span className="hidden sm:inline">思考</span>
+        </button>
         <textarea
           value={input}
           onChange={(e) => setInput(e.target.value)}
@@ -1075,8 +1415,14 @@ export default function NexusChat({
               handleSubmit(e as any);
             }
           }}
-          placeholder={canChat ? '有问题，尽管问' : '登录后开始对话'}
-          className="min-h-[40px] max-h-[200px] flex-1 resize-none border-none bg-transparent px-0 py-2 text-[15px] leading-6 text-foreground placeholder:text-muted-foreground focus:outline-none"
+          placeholder={
+            !isReady
+              ? ''
+              : canChat
+                ? '有问题，尽管问'
+                : '登录后开始对话'
+          }
+          className="min-h-[40px] max-h-[200px] min-w-0 flex-1 resize-none border-none bg-transparent py-2 pl-0 pr-1 text-[15px] leading-6 text-foreground placeholder:text-muted-foreground focus:outline-none"
           rows={1}
           disabled={!canChat || isLoading}
         />
@@ -1129,22 +1475,8 @@ export default function NexusChat({
         </div>
       </header>
 
-      {showRestoreLoading ? (
-        <div className="flex min-h-0 flex-1 flex-col">
-          <div className="flex min-h-0 flex-1 flex-col items-center justify-center px-4 py-8">
-            <div className="mx-auto flex w-full max-w-3xl flex-col items-center gap-3 text-muted-foreground">
-              <div className="flex gap-1">
-                <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-primary/40 [animation-delay:-0.3s]" />
-                <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-primary/40 [animation-delay:-0.15s]" />
-                <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-primary/40" />
-              </div>
-              <p className="text-sm">
-                {!persistHydrated ? '正在恢复会话…' : '加载对话中…'}
-              </p>
-            </div>
-          </div>
-          <div className="shrink-0 px-3 pt-2 sm:px-4 pb-safe-composer">{composerForm}</div>
-        </div>
+      {shellLoading ? (
+        <ChatShellSkeleton />
       ) : localMessages.length === 0 && !activeConversationId ? (
         <div className="flex min-h-0 flex-1 flex-col">
           <div className="flex min-h-0 flex-1 flex-col items-center justify-center px-4 py-8 animate-ios-fade-in">
@@ -1181,7 +1513,9 @@ export default function NexusChat({
               <div key={msg.id} className="space-y-2">
                 {msg.role === 'assistant' &&
                   ((msg.thinkingLog && msg.thinkingLog.length > 0) ||
-                    (isLoading && msg.id === streamingAssistantId)) && (
+                    (thinkingModeEnabled &&
+                      isLoading &&
+                      msg.id === streamingAssistantId)) && (
                   <ThinkingTrace
                     logs={msg.thinkingLog ?? []}
                     stepDurationsMs={msg.thinkingStepDurationsMs}
@@ -1190,6 +1524,9 @@ export default function NexusChat({
                     )}
                   />
                 )}
+                {!thinkingModeEnabled &&
+                  isThisAssistantStreaming &&
+                  !msg.content.trim() && <AssistantStreamDots />}
                 <ChatMessage
                   message={msg as any}
                   onCopyAssistant={

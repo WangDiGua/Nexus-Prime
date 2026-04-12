@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import {
   Settings,
   Brain,
@@ -18,13 +18,10 @@ import { Label } from '@/components/ui/label';
 import { ModelSelect } from '@/components/ui/model-select';
 import { useTheme } from '@/lib/context/ThemeContext';
 import { toast } from '@/lib/toast';
-
-const MODEL_OPTIONS = [
-  { value: 'qwen-plus-latest', label: 'Qwen Plus (推荐)' },
-  { value: 'qwen-max', label: 'Qwen Max' },
-  { value: 'qwen-turbo', label: 'Qwen Turbo (快速)' },
-  { value: 'qwen-long', label: 'Qwen Long (长文本)' },
-] as const;
+import {
+  buildChatModelOptions,
+  normalizeChatModelId,
+} from '@/lib/chat-model-options';
 
 interface UserSettings {
   defaultModel: string;
@@ -71,6 +68,16 @@ export function UserSettingsForm({ variant = 'page' }: UserSettingsFormProps) {
 
   const isPopover = variant === 'popover';
 
+  const modelSelectOptions = useMemo(
+    () => buildChatModelOptions(settings?.defaultModel),
+    [settings?.defaultModel]
+  );
+
+  const resolvedDefaultModel = useMemo(() => {
+    const raw = settings?.defaultModel;
+    return normalizeChatModelId(raw) ?? raw ?? 'qwen-plus-latest';
+  }, [settings?.defaultModel]);
+
   useEffect(() => {
     fetchSettings();
     fetchApiKeys();
@@ -113,13 +120,18 @@ export function UserSettingsForm({ variant = 'page' }: UserSettingsFormProps) {
 
     setIsSaving(true);
     try {
+      const canonicalModel =
+        normalizeChatModelId(settings.defaultModel) ?? settings.defaultModel;
       const response = await fetch('/api/settings', {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(settings),
+        body: JSON.stringify({ ...settings, defaultModel: canonicalModel }),
       });
 
       if (response.ok) {
+        setSettings((s) =>
+          s ? { ...s, defaultModel: canonicalModel } : s
+        );
         setSaveMessage('设置已保存');
         setTimeout(() => setSaveMessage(''), 3000);
         toast.success('设置已保存');
@@ -234,7 +246,7 @@ export function UserSettingsForm({ variant = 'page' }: UserSettingsFormProps) {
     <div
       className={cn(
         isPopover
-          ? 'flex max-h-[min(75vh,640px)] min-h-0 flex-col'
+          ? 'flex h-full min-h-0 flex-1 flex-col'
           : 'flex gap-6'
       )}
     >
@@ -341,14 +353,18 @@ export function UserSettingsForm({ variant = 'page' }: UserSettingsFormProps) {
                         })
                       }
                       className={cn(
-                        'relative h-6 w-12 shrink-0 rounded-full transition-colors',
-                        settings?.enableHistoryContext ? 'bg-primary' : 'bg-zinc-200 dark:bg-zinc-700'
+                        'relative h-6 w-12 shrink-0 rounded-full border border-transparent transition-colors',
+                        settings?.enableHistoryContext
+                          ? 'bg-primary shadow-inner'
+                          : 'bg-zinc-200 dark:border-white/10 dark:bg-zinc-700'
                       )}
                     >
                       <div
                         className={cn(
-                          'absolute top-0.5 h-5 w-5 rounded-full bg-white transition-transform',
-                          settings?.enableHistoryContext ? 'translate-x-6' : 'translate-x-0.5'
+                          'absolute top-0.5 h-5 w-5 rounded-full shadow-sm transition-transform',
+                          settings?.enableHistoryContext
+                            ? 'translate-x-6 bg-primary-foreground'
+                            : 'translate-x-0.5 bg-white'
                         )}
                       />
                     </button>
@@ -370,14 +386,18 @@ export function UserSettingsForm({ variant = 'page' }: UserSettingsFormProps) {
                         })
                       }
                       className={cn(
-                        'relative h-6 w-12 shrink-0 rounded-full transition-colors',
-                        settings?.enableVectorSearch ? 'bg-primary' : 'bg-zinc-200 dark:bg-zinc-700'
+                        'relative h-6 w-12 shrink-0 rounded-full border border-transparent transition-colors',
+                        settings?.enableVectorSearch
+                          ? 'bg-primary shadow-inner'
+                          : 'bg-zinc-200 dark:border-white/10 dark:bg-zinc-700'
                       )}
                     >
                       <div
                         className={cn(
-                          'absolute top-0.5 h-5 w-5 rounded-full bg-white transition-transform',
-                          settings?.enableVectorSearch ? 'translate-x-6' : 'translate-x-0.5'
+                          'absolute top-0.5 h-5 w-5 rounded-full shadow-sm transition-transform',
+                          settings?.enableVectorSearch
+                            ? 'translate-x-6 bg-primary-foreground'
+                            : 'translate-x-0.5 bg-white'
                         )}
                       />
                     </button>
@@ -433,9 +453,9 @@ export function UserSettingsForm({ variant = 'page' }: UserSettingsFormProps) {
                     <div className="mt-2">
                       <ModelSelect
                         id="inline-settings-default-model"
-                        value={settings?.defaultModel || 'qwen-plus-latest'}
+                        value={resolvedDefaultModel}
                         onChange={(v) => setSettings({ ...settings!, defaultModel: v })}
-                        options={[...MODEL_OPTIONS]}
+                        options={modelSelectOptions}
                       />
                     </div>
                   </div>
