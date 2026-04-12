@@ -9,15 +9,19 @@ import { useAuth } from '@/components/auth/auth-provider';
 import { MOBILE_BREAKPOINT } from '@/hooks/use-mobile';
 
 export default function ChatPage() {
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  /**
+   * true = 移动端侧栏收起 / 桌面端窄条。
+   * 默认 true：移动端首屏即收起（避免 false 时整屏抽屉盖住主内容）。
+   * 挂载后若视口 ≥ md，再展开为桌面常规侧栏宽度。
+   */
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(true);
   const { openRegister } = useAuth();
 
-  /** 窄屏默认收起侧栏为抽屉（延后一帧设置，避免与 eslint 同步 setState 规则冲突） */
   useEffect(() => {
     if (typeof window === 'undefined') return;
-    if (window.innerWidth >= MOBILE_BREAKPOINT) return;
-    const id = requestAnimationFrame(() => setSidebarCollapsed(true));
-    return () => cancelAnimationFrame(id);
+    if (window.innerWidth >= MOBILE_BREAKPOINT) {
+      setSidebarCollapsed(false);
+    }
   }, []);
 
   useEffect(() => {

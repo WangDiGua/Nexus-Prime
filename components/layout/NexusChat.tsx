@@ -1431,7 +1431,8 @@ export default function NexusChat({
     <form onSubmit={handleSubmit} className="relative mx-auto w-full max-w-3xl">
       <div
         className={cn(
-          'flex items-center gap-2 rounded-[1.75rem] border border-gpt-border bg-gpt-composer px-2 py-2 pl-2.5 shadow-sm transition-shadow focus-within:shadow-md focus-within:ring-2 focus-within:ring-primary/20 sm:gap-2.5'
+          'flex flex-wrap items-end gap-2 rounded-[1.75rem] border border-gpt-border bg-gpt-composer px-2 py-2 pl-2.5 shadow-sm transition-shadow focus-within:shadow-md focus-within:ring-2 focus-within:ring-primary/20',
+          'sm:flex-nowrap sm:gap-2.5'
         )}
       >
         <button
@@ -1479,8 +1480,8 @@ export default function NexusChat({
           <span className="hidden sm:inline">技能</span>
         </button>
         {selectedSkill ? (
-          <div className="flex min-w-0 max-w-[40%] shrink items-center gap-0.5 rounded-full bg-muted/80 py-1 pl-2 pr-1 text-xs text-foreground sm:max-w-[min(40%,220px)]">
-            <span className="min-w-0 truncate font-medium" title={selectedSkill.name}>
+          <div className="flex min-h-9 w-full min-w-0 basis-full items-center gap-0.5 rounded-full bg-muted/80 py-1 pl-2 pr-1 text-xs text-foreground sm:w-auto sm:max-w-[min(40%,220px)] sm:basis-auto">
+            <span className="min-w-0 flex-1 truncate font-medium sm:flex-initial" title={selectedSkill.name}>
               {selectedSkill.name}
             </span>
             <button
@@ -1494,34 +1495,36 @@ export default function NexusChat({
             </button>
           </div>
         ) : null}
-        <textarea
-          value={input}
-          onChange={(e) => setInput(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === 'Enter' && !e.shiftKey) {
-              e.preventDefault();
-              handleSubmit(e as any);
+        <div className="flex min-h-[44px] min-w-0 flex-1 basis-full items-end gap-2 sm:min-h-0 sm:basis-0 sm:min-w-[8rem]">
+          <textarea
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                handleSubmit(e as any);
+              }
+            }}
+            placeholder={
+              !isReady
+                ? ''
+                : canChat
+                  ? '有问题，尽管问'
+                  : '登录后开始对话'
             }
-          }}
-          placeholder={
-            !isReady
-              ? ''
-              : canChat
-                ? '有问题，尽管问'
-                : '登录后开始对话'
-          }
-          className="min-h-[40px] max-h-[200px] min-w-0 flex-1 resize-none border-none bg-transparent py-2 pl-0 pr-1 text-[15px] leading-6 text-foreground placeholder:text-muted-foreground focus:outline-none"
-          rows={1}
-          disabled={!canChat || isLoading}
-        />
-        <button
-          type="submit"
-          disabled={!canChat || !input.trim() || isLoading}
-          className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-foreground text-background transition-all hover:opacity-90 disabled:opacity-25 dark:bg-white dark:text-black"
-          aria-label="发送"
-        >
-          <ArrowUp size={20} strokeWidth={2.5} />
-        </button>
+            className="min-h-[44px] max-h-[200px] min-w-0 flex-1 resize-none border-none bg-transparent py-2.5 pl-0 pr-1 text-[15px] leading-normal text-foreground placeholder:text-muted-foreground focus:outline-none sm:min-h-[40px] sm:py-2 sm:leading-6"
+            rows={1}
+            disabled={!canChat || isLoading}
+          />
+          <button
+            type="submit"
+            disabled={!canChat || !input.trim() || isLoading}
+            className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-foreground text-background transition-all hover:opacity-90 disabled:opacity-25 dark:bg-white dark:text-black"
+            aria-label="发送"
+          >
+            <ArrowUp size={20} strokeWidth={2.5} />
+          </button>
+        </div>
       </div>
     </form>
   );
