@@ -14,11 +14,12 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { toast } from '@/lib/toast';
+import type { AuthSessionUserPayload } from '@/lib/auth/session-user';
 
 interface LoginDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  onSuccess: () => void;
+  onSuccess: (user: AuthSessionUserPayload) => void;
   onOpenRegister?: () => void;
 }
 
@@ -46,7 +47,11 @@ export function LoginDialog({
         credentials: 'include',
       });
 
-      const data = await response.json();
+      const data = (await response.json()) as {
+        success?: boolean;
+        error?: string;
+        user?: AuthSessionUserPayload;
+      };
 
       if (!response.ok || !data.success) {
         const msg = data.error || '登录失败';
@@ -56,21 +61,18 @@ export function LoginDialog({
         return;
       }
 
-      const verifyResponse = await fetch('/api/auth/me', {
-        method: 'GET',
-        credentials: 'include',
-      });
-
-      if (verifyResponse.ok) {
-        toast.success('登录成功');
-        onSuccess();
-        setUsername('');
-        setPassword('');
-      } else {
-        const msg = '登录状态验证失败，请检查浏览器 Cookie 设置';
+      if (!data.user?.id) {
+        const msg = '登录响应缺少用户信息，请稍后重试';
         setError(msg);
         toast.error(msg);
+        setLoading(false);
+        return;
       }
+
+      toast.success('登录成功');
+      setUsername('');
+      setPassword('');
+      onSuccess(data.user);
     } catch {
       const msg = '网络错误，请稍后重试';
       setError(msg);

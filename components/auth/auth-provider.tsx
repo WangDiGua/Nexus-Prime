@@ -11,6 +11,10 @@ import {
   type ReactNode,
 } from 'react';
 import type { User } from '@/types/user';
+import {
+  sessionPayloadToUser,
+  type AuthSessionUserPayload,
+} from '@/lib/auth/session-user';
 import { LoginDialog } from '@/components/auth/login-dialog';
 import { RegisterDialog } from '@/components/auth/register-dialog';
 
@@ -118,9 +122,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       <LoginDialog
         open={loginOpen}
         onOpenChange={setLoginOpen}
-        onSuccess={() => {
-          void refresh();
+        onSuccess={(payload: AuthSessionUserPayload) => {
+          setUser(sessionPayloadToUser(payload));
           setLoginOpen(false);
+          void refresh();
         }}
         onOpenRegister={() => {
           setLoginOpen(false);
@@ -130,9 +135,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       <RegisterDialog
         open={registerOpen}
         onOpenChange={setRegisterOpen}
-        onSuccess={() => {
-          void refresh();
+        onSuccess={(payload: AuthSessionUserPayload) => {
+          setUser(sessionPayloadToUser(payload));
           setRegisterOpen(false);
+          void refresh();
         }}
         onOpenLogin={() => {
           setRegisterOpen(false);

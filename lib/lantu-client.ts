@@ -1,3 +1,8 @@
+import {
+  LantuConnectClient,
+  LantuConnectError,
+  createLantuConnectConfigFromEnv,
+} from 'lantuconnect-sdk';
 import { ApiConfig, createApiConfig } from './api-config';
 
 export interface LantuResource {
@@ -24,11 +29,14 @@ export interface LantuTool {
     description: string;
     parameters: {
       type: 'object';
-      properties: Record<string, {
-        type: string;
-        description?: string;
-        enum?: string[];
-      }>;
+      properties: Record<
+        string,
+        {
+          type: string;
+          description?: string;
+          enum?: string[];
+        }
+      >;
       required?: string[];
     };
   };
@@ -67,91 +75,45 @@ export interface AggregatedToolsResponse {
   warnings?: string[];
 }
 
+function createCoreClient(config: ApiConfig): LantuConnectClient {
+  return new LantuConnectClient(
+    createLantuConnectConfigFromEnv(process.env, {
+      baseUrl: config.baseUrl,
+      apiKey: config.apiKey,
+      timeoutMs: config.timeout.api,
+      apiKeyHeader: config.headers.apiKey,
+      traceHeader: config.headers.trace,
+    })
+  );
+}
+
+function parseBodyString(body: string | undefined): unknown {
+  if (body == null || body === '') return body;
+  try {
+    return JSON.parse(body) as unknown;
+  } catch {
+    return body;
+  }
+}
+
 class LantuClient {
   private config: ApiConfig;
-  private mcpSessionCache: Map<string, string> = new Map();
+  private core: LantuConnectClient | null = null;
 
   constructor(config?: ApiConfig) {
     this.config = config || createApiConfig();
   }
 
-  private getHeaders(extra?: Record<string, string>): HeadersInit {
-    const headers: HeadersInit = {
-      'Content-Type': 'application/json',
-    };
-    if (this.config.apiKey) {
-      headers[this.config.headers.apiKey] = this.config.apiKey;
+  private getCore(): LantuConnectClient {
+    if (!this.core) {
+      this.core = createCoreClient(this.config);
     }
-    if (extra) {
-      Object.assign(headers, extra);
-    }
-    return headers;
+    return this.core;
   }
 
   private async mcpInitialize(resourceId: string): Promise<void> {
-    const cached = this.mcpSessionCache.get(resourceId);
-    if (cached === 'done') return;
-
-    console.log(`[LantuClient] 🔐 MCP Initialize (${resourceId})...`);
-
-    try {
-      const initBody = {
-        jsonrpc: '2.0',
-        id: 1,
-        method: 'initialize',
-        params: {
-          protocolVersion: '2024-11-05',
-          capabilities: {},
-          clientInfo: { name: 'Nexus-Prime', version: '1.0.0' },
-        },
-      };
-
-      let initResponse = await fetch(
-        `${this.config.baseUrl}/mcp/v1/resources/mcp/${resourceId}/message`,
-        {
-          method: 'POST',
-          headers: this.getHeaders(),
-          body: JSON.stringify(initBody),
-        }
-      );
-
-      console.log(`[LantuClient] 🔐 Initialize response: ${initResponse.status}`);
-      if (!initResponse.ok) {
-        const errText = await initResponse.text();
-        console.warn(`[LantuClient] ⚠️ Initialize 返回非200: ${errText.slice(0, 200)}`);
-      }
-
-      const initSid = initResponse.headers.get('mcp-session-id');
-      if (initSid) {
-        this.mcpSessionCache.set(resourceId, initSid);
-        console.log(`[LantuClient] ✅ Initialize 成功, sessionId=${initSid.slice(0, 12)}...`);
-      } else {
-        console.log(`[LantuClient] ✅ Initialize 完成 (无session-id header，后端管理session)`);
-      }
-
-      console.log(`[LantuClient] 📤 发送 notifications/initialized...`);
-
-      const notifBody = {
-        jsonrpc: '2.0',
-        method: 'notifications/initialized',
-      };
-
-      const notifResponse = await fetch(
-        `${this.config.baseUrl}/mcp/v1/resources/mcp/${resourceId}/message`,
-        {
-          method: 'POST',
-          headers: this.getHeaders(),
-          body: JSON.stringify(notifBody),
-        }
-      );
-
-      console.log(`[LantuClient] 📤 initialized notification: ${notifResponse.status}`);
-
-      this.mcpSessionCache.set(resourceId, 'done');
-    } catch (error) {
-      console.error(`[LantuClient] ❌ Initialize 失败:`, error);
-      throw error;
-    }
+    const c = this.getCore();
+    await c.mcpEnsureInitialized(resourceId);
   }
 
   async fetchResources(params?: {
@@ -160,62 +122,70 @@ class LantuClient {
     keyword?: string;
     page?: number;
     pageSize?: number;
-  }): Promise<{ items: LantuResource[]; total: number }> {
+  }): Promise<{ items: LantuResource[]; total: number; error?: string }> {
     try {
-      const searchParams = new URLSearchParams();
-      if (params?.resourceType) searchParams.set('resourceType', params.resourceType);
-      if (params?.status) searchParams.set('status', params.status);
-      if (params?.keyword) searchParams.set('keyword', params.keyword);
-      if (params?.page) searchParams.set('page', String(params.page));
-      if (params?.pageSize) searchParams.set('pageSize', String(params.pageSize));
+      const page = await this.getCore().listResources({
+        page: params?.page,
+        pageSize: params?.pageSize,
+        resourceType: params?.resourceType,
+        status: params?.status,
+        keyword: params?.keyword,
+      });
 
-      const response = await fetch(
-        `${this.config.baseUrl}${this.config.sdk.resourcesPath}?${searchParams.toString()}`,
-        { headers: this.getHeaders() }
+      const rawList = page.list || [];
+
+      console.log(
+        `[LantuClient] 📥 原始资源数据 (前2条):`,
+        rawList.slice(0, 2).map((r) => {
+          const row = r as Record<string, unknown>;
+          return {
+            resourceId: row.resourceId,
+            resourceCode: row.resourceCode,
+            displayName: row.displayName,
+            resourceType: row.resourceType,
+            status: row.status,
+            _keys: Object.keys(row),
+          };
+        }),
       );
 
-      if (!response.ok) {
-        throw new Error(`HTTP ${response.status}`);
-      }
+      const items: LantuResource[] = rawList.map((r) => {
+        const row = r as Record<string, unknown>;
+        return {
+          id: String(row.resourceId ?? row.id ?? ''),
+          name: String(row.displayName ?? row.name ?? row.resourceCode ?? ''),
+          displayName: row.displayName as string | undefined,
+          resourceCode: row.resourceCode as string | undefined,
+          type: (row.resourceType ?? row.type ?? 'mcp') as LantuResource['type'],
+          status: (row.status ?? 'draft') as LantuResource['status'],
+          description: row.description as string | undefined,
+          endpoint: row.endpoint as string | undefined,
+          icon: row.icon as string | undefined,
+          tags: (row.tags as string[] | undefined) ?? (row.catalogTagNames as string[] | undefined),
+          ownerName: (row.createdByName as string | undefined) ?? (row.ownerName as string | undefined),
+          createdByName: row.createdByName as string | undefined,
+          createdAt: (row.createTime as string | undefined) ?? (row.createdAt as string | undefined),
+          updatedAt: (row.updateTime as string | undefined) ?? (row.updatedAt as string | undefined),
+        };
+      });
 
-      const data = await response.json();
-      const resultData = data.data || {};
-      const rawList: any[] = resultData.list || [];
-
-      console.log(`[LantuClient] 📥 原始资源数据 (前2条):`, rawList.slice(0, 2).map(r => ({
-        resourceId: r.resourceId,
-        resourceCode: r.resourceCode,
-        displayName: r.displayName,
-        resourceType: r.resourceType,
-        status: r.status,
-        _keys: Object.keys(r)
-      })));
-
-      const items: LantuResource[] = rawList.map((r: any) => ({
-        id: r.resourceId || r.id || '',
-        name: r.displayName || r.name || r.resourceCode || '',
-        displayName: r.displayName,
-        resourceCode: r.resourceCode,
-        type: (r.resourceType || r.type || 'mcp') as LantuResource['type'],
-        status: (r.status || 'draft') as LantuResource['status'],
-        description: r.description,
-        endpoint: r.endpoint,
-        icon: r.icon,
-        tags: r.tags || r.catalogTagNames,
-        ownerName: r.createdByName || r.ownerName,
-        createdByName: r.createdByName,
-        createdAt: r.createTime || r.createdAt,
-        updatedAt: r.updateTime || r.updatedAt,
-      }));
-
-      return { items, total: resultData.total || 0 };
+      return { items, total: page.total || 0 };
     } catch (error) {
+      const msg =
+        error instanceof LantuConnectError
+          ? error.message
+          : error instanceof Error
+            ? error.message
+            : String(error);
       console.error('Failed to fetch resources:', error);
-      return { items: [], total: 0 };
+      return { items: [], total: 0, error: msg };
     }
   }
 
-  async fetchAggregatedTools(entryResourceType?: string, entryResourceId?: string): Promise<AggregatedToolsResponse> {
+  async fetchAggregatedTools(
+    entryResourceType?: string,
+    entryResourceId?: string
+  ): Promise<AggregatedToolsResponse> {
     const actualEntryType = entryResourceType || this.config.entryResource.type;
     const actualEntryId = entryResourceId || this.config.entryResource.id;
 
@@ -231,36 +201,28 @@ class LantuClient {
     entryResourceId: string
   ): Promise<AggregatedToolsResponse> {
     try {
-      const searchParams = new URLSearchParams();
-      searchParams.set('entryResourceType', entryResourceType);
-      searchParams.set('entryResourceId', entryResourceId);
+      const agg = await this.getCore().aggregatedTools(entryResourceType, entryResourceId);
+      const result = agg as Record<string, unknown>;
+      const tf = this.config.toolsField;
+      const rf = this.config.routeField;
 
-      const response = await fetch(
-        `${this.config.baseUrl}${this.config.sdk.toolsPath}?${searchParams.toString()}`,
-        { headers: this.getHeaders() }
-      );
+      const openAiToolsRaw = (result[tf.openAiTools] ?? result.openAiTools ?? []) as unknown[];
+      const routesData = (result[tf.routes] ?? result.routes ?? []) as unknown[];
+      const warnings = (result[tf.warnings] ?? result.warnings ?? []) as string[];
 
-      if (!response.ok) {
-        throw new Error(`HTTP ${response.status}`);
-      }
+      const tools: LantuTool[] = (openAiToolsRaw as unknown[]).map((t: unknown) => {
+        const m = t as { function?: LantuTool['function']; _lantu?: LantuTool['_lantu'] };
+        return {
+          type: 'function' as const,
+          function: m.function!,
+          _lantu: m._lantu,
+        };
+      });
 
-      const data = await response.json();
-      const result = data.data || {};
-
-      const openAiTools = result[this.config.toolsField.openAiTools] || [];
-      const routesData = result[this.config.toolsField.routes] || [];
-      const warnings = result[this.config.toolsField.warnings] || [];
-
-      const tools: LantuTool[] = openAiTools.map((t: any) => ({
-        type: 'function',
-        function: t.function,
-        _lantu: t._lantu,
-      }));
-
-      const routes = routesData.map((r: any) => ({
-        toolName: r[this.config.routeField.functionName],
-        resourceType: r.resourceType,
-        resourceId: r.resourceId,
+      const routes = (routesData as Record<string, unknown>[]).map((r) => ({
+        toolName: String(r[rf.functionName] ?? r.unifiedFunctionName ?? ''),
+        resourceType: String(r.resourceType ?? ''),
+        resourceId: String(r.resourceId ?? ''),
       }));
 
       return { tools, routes, warnings };
@@ -273,9 +235,24 @@ class LantuClient {
   private async fetchAggregatedToolsFromMcpList(): Promise<AggregatedToolsResponse> {
     try {
       console.log('[LantuClient] 🔍 开始获取已发布的 MCP 资源列表...');
-      const { items: mcps } = await this.fetchResources({ resourceType: 'mcp', status: 'published' });
-      console.log(`[LantuClient] 📋 找到 ${mcps.length} 个已发布的 MCP 资源:`, mcps.map(m => `${m.name}(${m.id})`));
-      
+      const { items: mcps, error: catalogError } = await this.fetchResources({
+        resourceType: 'mcp',
+        status: 'published',
+      });
+      if (catalogError) {
+        return {
+          tools: [],
+          routes: [],
+          warnings: [
+            `资源目录请求失败（${catalogError}）。多为网关返回了非 JSON（例如 HTML 或 404 页）、或 baseUrl/Key 与 LantuConnect-Backend 不一致。`,
+          ],
+        };
+      }
+      console.log(
+        `[LantuClient] 📋 找到 ${mcps.length} 个已发布的 MCP 资源:`,
+        mcps.map((m) => `${m.name}(${m.id})`)
+      );
+
       if (mcps.length === 0) {
         return { tools: [], routes: [], warnings: ['No published MCP resources found'] };
       }
@@ -288,7 +265,10 @@ class LantuClient {
         try {
           console.log(`[LantuClient] 🔄 正在获取 MCP "${mcp.name}" (${mcp.id}) 的工具列表...`);
           const toolsList = await this.mcpToolsList(mcp.id);
-          console.log(`[LantuClient] ✅ MCP "${mcp.name}" 返回 ${toolsList.length} 个工具:`, toolsList.map(t => t.name));
+          console.log(
+            `[LantuClient] ✅ MCP "${mcp.name}" 返回 ${toolsList.length} 个工具:`,
+            toolsList.map((t) => t.name)
+          );
 
           for (const tool of toolsList) {
             const toolName = `mcp_${mcp.id}_${tool.name}`;
@@ -297,7 +277,9 @@ class LantuClient {
               function: {
                 name: toolName,
                 description: tool.description || `Tool from ${mcp.name}`,
-                parameters: tool.inputSchema || ({ type: 'object', properties: {} } as any),
+                parameters:
+                  (tool.inputSchema as LantuTool['function']['parameters']) ||
+                  ({ type: 'object', properties: {} } as LantuTool['function']['parameters']),
               },
               _lantu: {
                 resourceType: 'mcp',
@@ -326,22 +308,15 @@ class LantuClient {
     }
   }
 
-  async mcpToolsList(resourceId: string): Promise<Array<{
-    name: string;
-    description?: string;
-    inputSchema?: object;
-  }>> {
+  async mcpToolsList(
+    resourceId: string
+  ): Promise<Array<{ name: string; description?: string; inputSchema?: object }>> {
     console.log(`[LantuClient] 📞 调用 mcpToolsList(${resourceId})`);
 
-    await this.mcpInitialize(resourceId);
-    const response = await this.mcpInvoke(resourceId, { method: 'tools/list' });
-    
-    if (!response.success || !response.data) {
-      throw new Error(response.error || 'Failed to get tools list');
-    }
-
-    const result = response.data as any;
-    return result.result?.tools || result.tools || [];
+    const raw = await this.getCore().mcpToolsList(resourceId);
+    const obj = raw as { tools?: Array<{ name: string; description?: string; inputSchema?: object }> };
+    const tools = obj?.tools ?? (Array.isArray(raw) ? raw : []);
+    return tools as Array<{ name: string; description?: string; inputSchema?: object }>;
   }
 
   async mcpInvoke(
@@ -350,63 +325,66 @@ class LantuClient {
     _retryCount = 0
   ): Promise<InvokeResponse> {
     const startTime = Date.now();
+    const c = this.getCore();
 
     try {
       const body = {
-        jsonrpc: '2.0',
+        jsonrpc: '2.0' as const,
         id: 1,
         method: payload.method,
         ...(payload.arguments ? { params: payload.arguments } : {}),
       };
 
-      console.log(`[LantuClient] 🚀 MCP Invoke → /mcp/v1/resources/mcp/${resourceId}/message ${JSON.stringify(body).slice(0, 200)}`);
-
-      const response = await fetch(
-        `${this.config.baseUrl}/mcp/v1/resources/mcp/${resourceId}/message`,
-        {
-          method: 'POST',
-          headers: this.getHeaders(),
-          body: JSON.stringify(body),
-        }
+      console.log(
+        `[LantuClient] 🚀 MCP Invoke → /mcp/v1/resources/mcp/${resourceId}/message ${JSON.stringify(body).slice(0, 200)}`
       );
 
-      console.log(`[LantuClient] 📊 MCP Response status: ${response.status}`);
+      let { status, json: data } = await c.mcpMessage('mcp', resourceId, body);
 
-      if (!response.ok) {
-        const errorText = await response.text();
-        console.error(`[LantuClient] ❌ MCP HTTP Error ${response.status}:`, errorText.slice(0, 300));
+      console.log(`[LantuClient] 📊 MCP Response status: ${status}`);
 
-        if (_retryCount === 0 && errorText.includes('should be mcp initialize request')) {
+      if (status < 200 || status >= 300) {
+        const errorText = JSON.stringify(data);
+        console.error(`[LantuClient] ❌ MCP HTTP Error ${status}:`, errorText.slice(0, 300));
+
+        if (
+          _retryCount === 0 &&
+          typeof errorText === 'string' &&
+          errorText.includes('should be mcp initialize request')
+        ) {
           console.log(`[LantuClient] 🔄 Session 过期，清除缓存并重新初始化 (${resourceId})...`);
-          this.mcpSessionCache.delete(resourceId);
+          c.mcpClearSession(resourceId);
           await this.mcpInitialize(resourceId);
           console.log(`[LantuClient] 🔄 重新初始化完成，重试请求...`);
           return this.mcpInvoke(resourceId, payload, _retryCount + 1);
         }
 
-        throw new Error(`HTTP ${response.status}: ${errorText.slice(0, 200)}`);
+        throw new Error(`HTTP ${status}: ${errorText.slice(0, 200)}`);
       }
 
-      const data = await response.json();
       console.log(`[LantuClient] ✅ MCP Response data:`, JSON.stringify(data).slice(0, 300));
 
-      if (data.error) {
-        if (_retryCount === 0 && data.error.message?.includes('initialize')) {
+      const errObj = data as { error?: { message?: string } } | null;
+      if (errObj && typeof errObj === 'object' && 'error' in errObj && errObj.error) {
+        const msg = errObj.error?.message ?? '';
+        if (_retryCount === 0 && msg.toLowerCase().includes('initialize')) {
           console.log(`[LantuClient] 🔄 Session 过期(JSON-RPC error)，清除缓存并重新初始化 (${resourceId})...`);
-          this.mcpSessionCache.delete(resourceId);
+          c.mcpClearSession(resourceId);
           await this.mcpInitialize(resourceId);
           return this.mcpInvoke(resourceId, payload, _retryCount + 1);
         }
         return {
           success: false,
-          error: data.error.message || JSON.stringify(data.error),
+          error: errObj.error?.message || JSON.stringify(errObj.error),
           latency: Date.now() - startTime,
         };
       }
 
+      const result = (data as { result?: unknown })?.result;
+
       return {
         success: true,
-        data: data.result,
+        data: result,
         latency: Date.now() - startTime,
       };
     } catch (error) {
@@ -421,58 +399,44 @@ class LantuClient {
 
   async invoke(request: InvokeRequest): Promise<InvokeResponse> {
     const startTime = Date.now();
-    
+
     if (request.resourceType === 'mcp') {
       return this.invokeMcp(request);
     }
 
-    const body: Record<string, unknown> = {
-      [this.config.field.resourceType]: request.resourceType,
-      [this.config.field.resourceId]: request.resourceId,
-    };
-
-    if (request.version) {
-      body[this.config.field.version] = request.version;
-    }
-    if (request.timeoutSec) {
-      body[this.config.field.timeoutSec] = request.timeoutSec;
-    }
-    if (request.payload) {
-      body[this.config.field.payload] = request.payload;
-    }
-
     try {
-      const response = await fetch(
-        `${this.config.baseUrl}${this.config.sdk.invokePath}`,
-        {
-          method: 'POST',
-          headers: this.getHeaders(),
-          body: JSON.stringify(body),
-        }
-      );
+      const inv = await this.getCore().invoke({
+        resourceType: request.resourceType,
+        resourceId: request.resourceId,
+        version: request.version,
+        timeoutSec: request.timeoutSec,
+        payload: request.payload,
+      });
 
-      if (!response.ok) {
-        throw new Error(`HTTP ${response.status}`);
-      }
-
-      const data = await response.json();
-      const resultData = data.data || {};
+      const rf = this.config.responseField;
+      const data =
+        parseBodyString(inv.body) ??
+        (inv as unknown as Record<string, unknown>)[rf.body];
 
       return {
         success: true,
-        data: resultData[this.config.responseField.body],
-        requestId: resultData[this.config.responseField.requestId],
-        traceId: resultData[this.config.responseField.traceId],
-        statusCode: resultData[this.config.responseField.statusCode],
-        latency: resultData[this.config.responseField.latencyMs] || Date.now() - startTime,
+        data,
+        requestId: inv.requestId,
+        traceId: inv.traceId,
+        statusCode: inv.statusCode,
+        latency: inv.latencyMs ?? Date.now() - startTime,
       };
     } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+      const msg =
+        error instanceof LantuConnectError
+          ? error.message
+          : error instanceof Error
+            ? error.message
+            : String(error);
       console.error('Failed to invoke tool:', error);
-      
       return {
         success: false,
-        error: errorMessage,
+        error: msg,
         latency: Date.now() - startTime,
       };
     }
@@ -480,58 +444,55 @@ class LantuClient {
 
   private async invokeMcp(request: InvokeRequest): Promise<InvokeResponse> {
     const startTime = Date.now();
+    const c = this.getCore();
 
     try {
-      let payload = request.payload || {};
-      
+      const payload = request.payload || {};
+
       if (typeof payload === 'object' && 'method' in payload) {
-        const p = payload as any;
+        const p = payload as { method: string; name?: string; arguments?: Record<string, unknown> };
 
         await this.mcpInitialize(request.resourceId);
         const body = {
-          jsonrpc: '2.0',
+          jsonrpc: '2.0' as const,
           id: 1,
           method: p.method,
           params: {
             name: p.name,
-            arguments: p.arguments || {}
-          }
+            arguments: p.arguments || {},
+          },
         };
 
         console.log(`[LantuClient] 🔧 invokeMcp → ${request.resourceId} method=${p.method}`);
         console.log(`[LantuClient] 📤 发送 body:`, JSON.stringify(body, null, 2));
 
-        const response = await fetch(
-          `${this.config.baseUrl}/mcp/v1/resources/mcp/${request.resourceId}/message`,
-          {
-            method: 'POST',
-            headers: this.getHeaders(),
-            body: JSON.stringify(body),
-          }
-        );
+        const { status, json: data } = await c.mcpMessage('mcp', request.resourceId, body);
 
-        console.log(`[LantuClient] 📥 MCP Response status: ${response.status}`);
+        console.log(`[LantuClient] 📥 MCP Response status: ${status}`);
 
-        if (!response.ok) {
-          const errorText = await response.text();
-          console.error(`[LantuClient] ❌ MCP HTTP Error: ${errorText.slice(0, 500)}`);
-          throw new Error(`HTTP ${response.status}: ${errorText.slice(0, 200)}`);
+        if (status < 200 || status >= 300) {
+          const errorText = JSON.stringify(data);
+          console.error(`[LantuClient] ❌ MCP HTTP Error:`, errorText.slice(0, 500));
+          throw new Error(`HTTP ${status}: ${errorText.slice(0, 200)}`);
         }
 
-        const data = await response.json();
-        console.log(`[LantuClient] 📦 MCP Response data:`, JSON.stringify(data, null, 2).slice(0, 500));
+        console.log(
+          `[LantuClient] 📦 MCP Response data:`,
+          JSON.stringify(data, null, 2).slice(0, 500)
+        );
 
-        if (data.error) {
+        const d = data as { error?: { message?: string }; result?: unknown };
+        if (d.error) {
           return {
             success: false,
-            error: data.error.message || JSON.stringify(data.error),
+            error: d.error.message || JSON.stringify(d.error),
             latency: Date.now() - startTime,
           };
         }
 
         return {
           success: true,
-          data: data.result,
+          data: d.result,
           latency: Date.now() - startTime,
         };
       }
@@ -553,52 +514,22 @@ class LantuClient {
     onChunk: (chunk: string) => void
   ): Promise<InvokeResponse> {
     const startTime = Date.now();
-    
-    const body: Record<string, unknown> = {
-      [this.config.field.resourceType]: request.resourceType,
-      [this.config.field.resourceId]: request.resourceId,
-    };
-
-    if (request.version) {
-      body[this.config.field.version] = request.version;
-    }
-    if (request.timeoutSec) {
-      body[this.config.field.timeoutSec] = request.timeoutSec;
-    }
-    if (request.payload) {
-      body[this.config.field.payload] = request.payload;
-    }
 
     try {
-      const response = await fetch(
-        `${this.config.baseUrl}${this.config.sdk.invokeStreamPath}`,
+      let fullContent = '';
+      await this.getCore().invokeStream(
         {
-          method: 'POST',
-          headers: this.getHeaders(),
-          body: JSON.stringify(body),
+          resourceType: request.resourceType,
+          resourceId: request.resourceId,
+          version: request.version,
+          timeoutSec: request.timeoutSec,
+          payload: request.payload,
+        },
+        (chunk) => {
+          fullContent += chunk;
+          onChunk(chunk);
         }
       );
-
-      if (!response.ok) {
-        throw new Error(`HTTP ${response.status}`);
-      }
-
-      const reader = response.body?.getReader();
-      if (!reader) {
-        throw new Error('No response body');
-      }
-
-      const decoder = new TextDecoder();
-      let fullContent = '';
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        
-        const chunk = decoder.decode(value, { stream: true });
-        fullContent += chunk;
-        onChunk(chunk);
-      }
 
       return {
         success: true,
@@ -606,9 +537,13 @@ class LantuClient {
         latency: Date.now() - startTime,
       };
     } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+      const errorMessage =
+        error instanceof LantuConnectError
+          ? error.message
+          : error instanceof Error
+            ? error.message
+            : String(error);
       console.error('Failed to invoke stream:', error);
-      
       return {
         success: false,
         error: errorMessage,
@@ -619,20 +554,104 @@ class LantuClient {
 
   async resolveResource(resourceType: string, resourceId: string): Promise<LantuResource | null> {
     try {
-      const response = await fetch(
-        `${this.config.baseUrl}${this.config.sdk.resourcesPath}/${resourceType}/${resourceId}`,
-        { headers: this.getHeaders() }
-      );
-
-      if (!response.ok) {
-        throw new Error(`HTTP ${response.status}`);
-      }
-
-      const data = await response.json();
-      return data.data || null;
+      const data = await this.getCore().getResource(resourceType, resourceId);
+      return (data as LantuResource) || null;
     } catch (error) {
       console.error('Failed to resolve resource:', error);
       return null;
+    }
+  }
+
+  /**
+   * 从已发布目录中按 ID 查找资源摘要（resolve 无人设时，常用 description 作兜底）。
+   */
+  async fetchPublishedResourceSummary(
+    resourceType: string,
+    resourceId: string
+  ): Promise<{ displayName?: string; description?: string } | null> {
+    const pageSize = 300;
+    let page = 1;
+    const maxPages = 15;
+    while (page <= maxPages) {
+      const { items, total, error } = await this.fetchResources({
+        resourceType,
+        status: 'published',
+        page,
+        pageSize,
+      });
+      if (error && page === 1) {
+        console.warn('[LantuClient] fetchPublishedResourceSummary:', error);
+      }
+      const hit = items.find((i) => i.id === resourceId);
+      if (hit) {
+        return {
+          displayName: hit.displayName || hit.name,
+          description: hit.description?.trim() || undefined,
+        };
+      }
+      const t = typeof total === 'number' ? total : 0;
+      if (items.length < pageSize || page * pageSize >= t) break;
+      page += 1;
+    }
+    return null;
+  }
+
+  /**
+   * POST /sdk/v1/resolve — 获取技能等资源的 spec（如 skill 的 contextPrompt / hosted_system_prompt）。
+   * 用于门户对话：纯上下文技能往往未绑定 MCP，aggregatedTools 为 0，但仍需把人格注入 system prompt。
+   */
+  async resolveEntry(
+    resourceType: string,
+    resourceId: string
+  ): Promise<{
+    displayName?: string;
+    /** 目录/技能详情 Markdown（与后台 service_detail_md 对应） */
+    serviceDetailMd?: string;
+    spec?: Record<string, unknown>;
+    error?: string;
+  } | null> {
+    try {
+      const data = await this.getCore().resolve({
+        resourceType,
+        resourceId,
+      });
+      const row = data as Record<string, unknown>;
+      const pickStr = (keys: string[]): string | undefined => {
+        for (const k of keys) {
+          const v = row[k];
+          if (typeof v === 'string' && v.trim()) return v.trim();
+        }
+        return undefined;
+      };
+      const rawSpec =
+        row.spec && typeof row.spec === 'object'
+          ? ({ ...(row.spec as Record<string, unknown>) } as Record<string, unknown>)
+          : undefined;
+      if (rawSpec) {
+        if (
+          rawSpec.contextPrompt == null &&
+          typeof rawSpec.context_prompt === 'string'
+        ) {
+          rawSpec.contextPrompt = rawSpec.context_prompt;
+        }
+        if (rawSpec.entryDoc == null && typeof rawSpec.entry_doc === 'string') {
+          rawSpec.entryDoc = rawSpec.entry_doc;
+        }
+      }
+      return {
+        displayName: pickStr(['displayName', 'display_name']),
+        serviceDetailMd: pickStr(['serviceDetailMd', 'service_detail_md']),
+        spec: rawSpec,
+      };
+    } catch (error) {
+      const msg =
+        error instanceof LantuConnectError
+          ? error.message
+          : error instanceof Error
+            ? error.message
+            : String(error);
+      console.error('[LantuClient] resolveEntry failed:', msg);
+      return { error: msg };
     }
   }
 }

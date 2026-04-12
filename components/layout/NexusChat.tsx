@@ -3,9 +3,11 @@
 import React, { useRef, useEffect, useState, useCallback, useMemo } from 'react';
 import {
   ArrowUp,
+  LayoutGrid,
   PanelLeft,
   Sparkles,
   Square,
+  X,
 } from 'lucide-react';
 import {
   ThinkingChainHeaderIcon,
@@ -30,6 +32,10 @@ import { useRegistryStore } from '@/hooks/use-registry-store';
 import { useConversationStore } from '@/hooks/use-conversation-store';
 import type { Message as StoredMessage } from '@/hooks/use-conversation-store';
 import type { ChatSSEEvent, ToolCall, ToolResult } from '@/types/chat';
+import {
+  SkillStoreSheet,
+  type ChatSelectedSkill,
+} from '@/components/chat/skill-store-sheet';
 
 export interface NexusChatProps {
   sidebarCollapsed?: boolean;
@@ -528,6 +534,38 @@ export default function NexusChat({
     }
   }, [thinkingModeEnabled]);
 
+  /** 选中的技能作为 chat 入口资源（entryResource），影响聚合工具列表 */
+  const [selectedSkill, setSelectedSkill] = useState<ChatSelectedSkill | null>(
+    null,
+  );
+  const [skillSheetOpen, setSkillSheetOpen] = useState(false);
+  useEffect(() => {
+    try {
+      const raw = window.localStorage.getItem('nexus-prime:chat-entry-skill');
+      if (!raw) return;
+      const parsed = JSON.parse(raw) as ChatSelectedSkill;
+      if (parsed?.id && typeof parsed.name === 'string') {
+        setSelectedSkill(parsed);
+      }
+    } catch {
+      /* ignore */
+    }
+  }, []);
+  useEffect(() => {
+    try {
+      if (selectedSkill) {
+        window.localStorage.setItem(
+          'nexus-prime:chat-entry-skill',
+          JSON.stringify(selectedSkill),
+        );
+      } else {
+        window.localStorage.removeItem('nexus-prime:chat-entry-skill');
+      }
+    } catch {
+      /* ignore */
+    }
+  }, [selectedSkill]);
+
   const prevActiveConversationId = useRef<string | null>(activeConversationId);
   /** 仅用于恢复拉取：首帧为 null，便于在「刷新 / 首次进入带 id」时与当前 id 比较为已变化，从而必定请求服务端 */
   const restorePrevConversationIdRef = useRef<string | null>(null);
@@ -738,6 +776,8 @@ export default function NexusChat({
       conversationId: string | null;
       controller: AbortController;
       enableThinking: boolean;
+      /** 未选技能时由服务端使用默认 entry（api-config） */
+      entrySkill: ChatSelectedSkill | null;
     }) => {
       const {
         assistantMessageId,
@@ -745,6 +785,7 @@ export default function NexusChat({
         conversationId: currentConversationId,
         controller,
         enableThinking,
+        entrySkill,
       } = params;
 
       /** 未开启「思考」时不展示/不落库 ReAct 思维链（仍走工具调用与正文流） */
@@ -779,6 +820,12 @@ export default function NexusChat({
             conversationId: currentConversationId,
             messages: apiMessages,
             enableThinking,
+            ...(entrySkill
+              ? {
+                  entryResourceType: 'skill',
+                  entryResourceId: entrySkill.id,
+                }
+              : {}),
           }),
           signal: controller.signal,
         });
@@ -1257,6 +1304,7 @@ export default function NexusChat({
         conversationId: activeConversationId,
         controller,
         enableThinking: thinkingModeEnabled,
+        entrySkill: selectedSkill,
       });
     },
     [
@@ -1267,6 +1315,7 @@ export default function NexusChat({
       activeConversationId,
       runAssistantStream,
       thinkingModeEnabled,
+      selectedSkill,
     ],
   );
 
@@ -1346,6 +1395,7 @@ export default function NexusChat({
       conversationId: currentConversationId,
       controller,
       enableThinking: thinkingModeEnabled,
+      entrySkill: selectedSkill,
     });
   };
 
@@ -1406,6 +1456,44 @@ export default function NexusChat({
           <Sparkles className="size-4 shrink-0" aria-hidden />
           <span className="hidden sm:inline">思考</span>
         </button>
+        <button
+          type="button"
+          onClick={() => setSkillSheetOpen(true)}
+          disabled={!canChat || isLoading}
+          aria-pressed={Boolean(selectedSkill)}
+          title={
+            selectedSkill
+              ? `当前技能：${selectedSkill.name}（点击更换）`
+              : '技能商城：选择后作为对话工具入口'
+          }
+          className={cn(
+            'flex h-10 shrink-0 items-center gap-1 rounded-full px-2 text-xs font-medium transition-colors sm:px-2.5',
+            !canChat || isLoading
+              ? 'cursor-not-allowed opacity-40'
+              : selectedSkill
+                ? 'bg-primary/15 text-primary hover:bg-primary/20'
+                : 'text-muted-foreground hover:bg-muted/70'
+          )}
+        >
+          <LayoutGrid className="size-4 shrink-0" aria-hidden />
+          <span className="hidden sm:inline">技能</span>
+        </button>
+        {selectedSkill ? (
+          <div className="flex min-w-0 max-w-[40%] shrink items-center gap-0.5 rounded-full bg-muted/80 py-1 pl-2 pr-1 text-xs text-foreground sm:max-w-[min(40%,220px)]">
+            <span className="min-w-0 truncate font-medium" title={selectedSkill.name}>
+              {selectedSkill.name}
+            </span>
+            <button
+              type="button"
+              onClick={() => setSelectedSkill(null)}
+              disabled={!canChat || isLoading}
+              className="flex size-7 shrink-0 items-center justify-center rounded-full text-muted-foreground transition-colors hover:bg-background/80 hover:text-foreground"
+              aria-label="清除所选技能"
+            >
+              <X className="size-3.5" />
+            </button>
+          </div>
+        ) : null}
         <textarea
           value={input}
           onChange={(e) => setInput(e.target.value)}
@@ -1549,6 +1637,13 @@ export default function NexusChat({
           <div className="shrink-0 px-3 pt-2 sm:px-4 pb-safe-composer">{composerForm}</div>
         </>
       )}
+      <SkillStoreSheet
+        open={skillSheetOpen}
+        onOpenChange={setSkillSheetOpen}
+        selected={selectedSkill}
+        onSelect={setSelectedSkill}
+        onClearSelection={() => setSelectedSkill(null)}
+      />
     </main>
   );
 }

@@ -17,6 +17,6 @@ export async function GET(request: NextRequest) {
     page,
     pageSize,
   });
-  
+
   return NextResponse.json({ data: result });
 }

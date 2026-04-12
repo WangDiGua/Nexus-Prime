@@ -27,6 +27,7 @@
     "ioredis": "^5.10.1",
     "jsonwebtoken": "^9.0.3",
     "ky": "^2.0.0",
+    "lantuconnect-sdk": "github:WangDiGua/lantuconnect-node-sdk",
     "lucide-react": "^0.553.0",
     "mermaid": "^11.14.0",
     "mitt": "^3.0.1",

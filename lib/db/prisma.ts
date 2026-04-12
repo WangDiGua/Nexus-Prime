@@ -1,4 +1,7 @@
 import { PrismaClient } from '@prisma/client';
+import { ensureMysqlDatabaseUrlFromParts } from './database-url';
+
+ensureMysqlDatabaseUrlFromParts();
 
 const globalForPrisma = globalThis as unknown as {
   prisma: PrismaClient | undefined;

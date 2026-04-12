@@ -15,10 +15,13 @@ import { Label } from '@/components/ui/label';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { toast } from '@/lib/toast';
 
+import type { AuthSessionUserPayload } from '@/lib/auth/session-user';
+
 interface RegisterDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  onSuccess: () => void;
+  /** 注册成功时传入接口返回的 user，避免依赖紧随其后的 /api/auth/me 竞态 */
+  onSuccess: (user: AuthSessionUserPayload) => void;
   onOpenLogin?: () => void;
 }
 
@@ -69,7 +72,11 @@ export function RegisterDialog({
         credentials: 'include',
       });
 
-      const data = await response.json();
+      const data = (await response.json()) as {
+        success?: boolean;
+        error?: string;
+        user?: AuthSessionUserPayload;
+      };
 
       if (!response.ok || !data.success) {
         const msg = data.error || '注册失败';
@@ -79,20 +86,17 @@ export function RegisterDialog({
         return;
       }
 
-      const verifyResponse = await fetch('/api/auth/me', {
-        method: 'GET',
-        credentials: 'include',
-      });
-
-      if (verifyResponse.ok) {
-        toast.success('注册成功');
-        resetForm();
-        onSuccess();
-      } else {
-        const msg = '注册状态验证失败，请检查浏览器 Cookie 设置';
+      if (!data.user?.id) {
+        const msg = '注册响应缺少用户信息，请稍后重试';
         setError(msg);
         toast.error(msg);
+        setLoading(false);
+        return;
       }
+
+      toast.success('注册成功');
+      resetForm();
+      onSuccess(data.user);
     } catch {
       const msg = '网络错误，请稍后重试';
       setError(msg);

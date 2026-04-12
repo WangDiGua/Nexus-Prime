@@ -1,6 +1,7 @@
 import { NextRequest } from 'next/server';
 import { createToolExecutor } from '@/lib/tool-executor';
 import { createApiConfig } from '@/lib/api-config';
+import { lantuClient } from '@/lib/lantu-client';
 import { ChatSSEEvent, ToolCall, ToolResult } from '@/types/chat';
 import { settingsService } from '@/lib/services/settings.service';
 import { messageService } from '@/lib/services/message.service';
@@ -232,6 +233,42 @@ function encodeSSE(event: ChatSSEEvent): string {
   return `data: ${JSON.stringify(event)}\n\n`;
 }
 
+const SKILL_SERVICE_DETAIL_MAX = 12000;
+
+/** 从 resolve 结果组装技能层（须置于 system 最前，避免被默认「三项能力」盖过） */
+function buildSkillLayerFromResolve(resolved: {
+  displayName?: string;
+  serviceDetailMd?: string;
+  spec?: Record<string, unknown>;
+}): string {
+  const parts: string[] = [];
+  if (resolved.displayName?.trim()) {
+    parts.push(`## 当前技能：${resolved.displayName.trim()}`);
+  }
+  const spec = resolved.spec;
+  if (spec && typeof spec === 'object') {
+    const ctx =
+      typeof spec.contextPrompt === 'string' ? spec.contextPrompt.trim() : '';
+    const doc =
+      typeof spec.entryDoc === 'string' ? spec.entryDoc.trim() : '';
+    if (ctx) {
+      parts.push(`### 人设与行为（托管提示，必须遵守）\n${ctx}`);
+    }
+    if (doc) {
+      parts.push(`### 入口说明\n${doc}`);
+    }
+  }
+  const md = resolved.serviceDetailMd?.trim();
+  if (md) {
+    const clipped =
+      md.length > SKILL_SERVICE_DETAIL_MAX
+        ? `${md.slice(0, SKILL_SERVICE_DETAIL_MAX)}\n\n…（服务详情过长已截断）`
+        : md;
+    parts.push(`### 服务详情（Markdown）\n${clipped}`);
+  }
+  return parts.join('\n\n').trim();
+}
+
 async function getRelevantHistory(
   query: string,
   conversationId: string,
@@ -412,6 +449,63 @@ export async function POST(req: NextRequest) {
 
   (async () => {
     try {
+      let skillLayer = '';
+      /** resolve 有内容 / 仅用目录 description 兜底 */
+      let skillLayerSource: 'resolve' | 'catalog' | 'none' = 'none';
+
+      if (
+        body.entryResourceType === 'skill' &&
+        body.entryResourceId != null &&
+        String(body.entryResourceId).trim() !== ''
+      ) {
+        const rid = String(body.entryResourceId).trim();
+        const resolved = await lantuClient.resolveEntry('skill', rid);
+        if (resolved?.error) {
+          console.warn('[Chat] 技能 resolve 失败（仍将尝试聚合工具）:', resolved.error);
+        } else if (resolved) {
+          skillLayer = buildSkillLayerFromResolve(resolved);
+          if (skillLayer.trim()) {
+            skillLayerSource = 'resolve';
+          } else {
+            console.warn(
+              '[Chat] 技能已选但 resolve 未返回可用人设/详情（hosted_system_prompt、entry_doc、service_detail_md 可能均为空），尝试目录 description 兜底'
+            );
+          }
+        }
+
+        if (!skillLayer.trim()) {
+          const sum = await lantuClient.fetchPublishedResourceSummary(
+            'skill',
+            rid
+          );
+          if (sum?.description?.trim()) {
+            const title = sum.displayName?.trim();
+            skillLayer = [
+              title ? `## 当前技能：${title}` : '',
+              `### 技能简介（来自资源目录）\n${sum.description!.trim()}`,
+            ]
+              .filter(Boolean)
+              .join('\n\n');
+            skillLayerSource = 'catalog';
+          }
+        }
+      }
+
+      const skillSelected =
+        body.entryResourceType === 'skill' &&
+        body.entryResourceId != null &&
+        String(body.entryResourceId).trim() !== '';
+
+      const skillPreamble =
+        skillLayer.trim().length > 0
+          ? `【最高优先级｜用户已通过技能商城选择本技能】\n${skillLayer.trim()}\n\n` +
+            `你必须以上述人设与说明为准回复；不要忽略角色去主动列举「美食推荐、网页抓取、八字命理」等通用能力清单，除非用户明确询问且与当前人设一致。\n\n---\n\n`
+          : skillSelected
+            ? `【最高优先级｜用户已选择技能】\n` +
+              `服务端未返回该技能的人设或详情（请检查后台「托管人设 / hosted_system_prompt」或「服务详情」）。` +
+              `请勿用默认助手模板里的「美食推荐/网页抓取/八字命理」清单代替用户所选技能；若无法扮演，请简短说明需管理员配置后再试。\n\n---\n\n`
+            : '';
+
       const toolExecutor = await createToolExecutor(
         body.entryResourceType,
         body.entryResourceId
@@ -433,7 +527,7 @@ export async function POST(req: NextRequest) {
         }));
       }
 
-      const systemPrompt = userSettings?.systemPrompt || `你是 Nexus-Prime，一个友好、专业的 AI 助手，拥有丰富的远程工具能力。
+      const baseSystemPrompt = userSettings?.systemPrompt || `你是 Nexus-Prime，一个友好、专业的 AI 助手，拥有丰富的远程工具能力。
 
 ## 核心能力
 
@@ -468,6 +562,9 @@ export async function POST(req: NextRequest) {
 2. 调用工具前，简要说明你将做什么
 3. 将工具返回的结果以自然的方式呈现给用户
 4. 如果工具调用失败，向用户解释情况并提供替代方案`;
+
+      /** 技能层必须放在最前，否则默认「核心能力」会压过角色扮演 */
+      const systemPrompt = skillPreamble + baseSystemPrompt;
 
       const conversationHistory: OpenAIMessage[] = [
         { role: 'system', content: systemPrompt },
@@ -517,7 +614,18 @@ export async function POST(req: NextRequest) {
       await writer.write(
         encoder.encode(encodeSSE({
           type: 'thinking',
-          content: `ReAct 模式启动，已加载 ${tools.length} 个远程工具`,
+          content: (() => {
+            const base = `ReAct 模式启动，已加载 ${tools.length} 个远程工具`;
+            if (skillLayer.trim().length === 0) {
+              return skillSelected
+                ? `${base}；已选技能但未拉到人设/详情（resolve 与目录 description 均为空，请在后台填写托管人设或资源描述）`
+                : base;
+            }
+            if (skillLayerSource === 'catalog') {
+              return `${base}；已用资源目录「描述」注入（建议在后台补全托管人设以获得更好角色效果）`;
+            }
+            return `${base}；已注入技能上下文（人设/详情，已置于 system 最前）`;
+          })(),
         }))
       );
 

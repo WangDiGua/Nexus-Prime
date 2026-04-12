@@ -21,9 +21,11 @@ export async function POST(request: NextRequest) {
     });
 
     // 设置认证 cookie
+    const cookieSecure = process.env.NODE_ENV === 'production';
+
     response.cookies.set('auth_token', result.tokens.accessToken, {
       httpOnly: true,
-      secure: false, // 开发环境使用 false
+      secure: cookieSecure,
       sameSite: 'lax',
       maxAge: 60 * 60 * 24 * 7, // 7 天
       path: '/',
@@ -31,7 +33,7 @@ export async function POST(request: NextRequest) {
 
     response.cookies.set('refresh_token', result.tokens.refreshToken, {
       httpOnly: true,
-      secure: false,
+      secure: cookieSecure,
       sameSite: 'lax',
       maxAge: 60 * 60 * 24 * 30, // 30 天
       path: '/',

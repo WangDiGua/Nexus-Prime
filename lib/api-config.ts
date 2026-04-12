@@ -1,3 +1,7 @@
+/**
+ * 门户侧配置：连接项与 `lantuconnect-sdk` 的 `createLantuConnectConfigFromEnv` 使用同一组 `LANTU_API_*`。
+ * 此处保留的是 **Nexus 业务**（ReAct 轮数、入口资源、聚合结果字段别名等），不属于 SDK 职责。
+ */
 export interface ApiConfig {
   baseUrl: string;
   apiKey: string | undefined;
@@ -5,23 +9,9 @@ export interface ApiConfig {
     apiKey: string;
     trace: string;
   };
+  /** HTTP 客户端超时（毫秒），与 `LANTU_API_TIMEOUT_MS` 一致 */
   timeout: {
     api: number;
-    invoke: number;
-  };
-  sdk: {
-    resourcesPath: string;
-    toolsPath: string;
-    invokePath: string;
-    invokeStreamPath: string;
-    resolvePath: string;
-  };
-  field: {
-    resourceType: string;
-    resourceId: string;
-    version: string;
-    timeoutSec: string;
-    payload: string;
   };
   responseField: {
     requestId: string;
@@ -62,21 +52,6 @@ export function createApiConfig(): ApiConfig {
     },
     timeout: {
       api: parseInt(process.env.LANTU_API_TIMEOUT_MS || '30000', 10),
-      invoke: parseInt(process.env.LANTU_INVOKE_DEFAULT_TIMEOUT_SEC || '30', 10),
-    },
-    sdk: {
-      resourcesPath: process.env.LANTU_SDK_RESOURCES_PATH || '/sdk/v1/resources',
-      toolsPath: process.env.LANTU_SDK_TOOLS_PATH || '/sdk/v1/capabilities/tools',
-      invokePath: process.env.LANTU_SDK_INVOKE_PATH || '/sdk/v1/invoke',
-      invokeStreamPath: process.env.LANTU_SDK_INVOKE_STREAM_PATH || '/sdk/v1/invoke-stream',
-      resolvePath: process.env.LANTU_SDK_RESOLVE_PATH || '/sdk/v1/resolve',
-    },
-    field: {
-      resourceType: process.env.LANTU_FIELD_RESOURCE_TYPE || 'resourceType',
-      resourceId: process.env.LANTU_FIELD_RESOURCE_ID || 'resourceId',
-      version: process.env.LANTU_FIELD_VERSION || 'version',
-      timeoutSec: process.env.LANTU_FIELD_TIMEOUT_SEC || 'timeoutSec',
-      payload: process.env.LANTU_FIELD_PAYLOAD || 'payload',
     },
     responseField: {
       requestId: process.env.LANTU_FIELD_REQUEST_ID || 'requestId',
