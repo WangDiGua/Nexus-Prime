@@ -1,13 +1,10 @@
 import { NextRequest } from 'next/server';
 import { createToolExecutor } from '@/lib/tool-executor';
 import { createApiConfig } from '@/lib/api-config';
-import { lantuClient } from '@/lib/lantu-client';
 import { ChatSSEEvent, ToolCall, ToolResult } from '@/types/chat';
 import { settingsService } from '@/lib/services/settings.service';
 import { messageService } from '@/lib/services/message.service';
-import { llmCache, toolCache } from '@/lib/cache/redis';
-import { vectorService } from '@/lib/vector/milvus';
-import { embeddingService } from '@/lib/vector/embedding';
+import { getCaches, getLantuClient, getVectorServices } from '@/lib/runtime/lazy-services';
 
 const apiConfig = createApiConfig();
 
@@ -275,6 +272,7 @@ async function getRelevantHistory(
   limit: number = 5
 ): Promise<OpenAIMessage[]> {
   try {
+    const { embeddingService, vectorService } = await getVectorServices();
     const queryEmbedding = await embeddingService.embed(query);
     const similarMessages = await vectorService.searchSimilar(queryEmbedding.embedding, { topK: limit });
     
@@ -303,6 +301,7 @@ async function callLLM(
   settings?: { model?: string; maxTokens?: number; temperature?: number }
 ): Promise<{ content: string | null; toolCalls: ToolCall[]; finishReason: string }> {
   const model = settings?.model || process.env.DASHSCOPE_MODEL || 'qwen-plus-latest';
+  const { llmCache } = await getCaches();
   
   const cacheKey = `${model}:${JSON.stringify(messages.slice(-2))}:${tools?.length || 0}`;
   let cached: { content: string | null; toolCalls: ToolCall[]; finishReason: string } | null = null;
@@ -459,6 +458,7 @@ export async function POST(req: NextRequest) {
         String(body.entryResourceId).trim() !== ''
       ) {
         const rid = String(body.entryResourceId).trim();
+        const lantuClient = await getLantuClient();
         const resolved = await lantuClient.resolveEntry('skill', rid);
         if (resolved?.error) {
           console.warn('[Chat] 技能 resolve 失败（仍将尝试聚合工具）:', resolved.error);
@@ -547,12 +547,18 @@ export async function POST(req: NextRequest) {
 
 ## 回复中的图表（可选）
 
-需要**折线图/柱状图**时，使用 \`\`\`chart 代码块，内容为**单行或多行 JSON**（合法 JSON 即可），字段：
-- \`type\`: \`"line"\` 或 \`"bar"\`
-- \`data\`: 对象数组，每项必须包含 \`xKey\` 对应字段及各 \`series.key\` 数值字段（数字）
-- \`xKey\`: 横轴类别字段名
-- \`series\`: \`[{ "key": "数值列名", "name": "图例名（可选）" }]\`，最多 8 条序列
+需要**折线图/柱状图/饼图**时，使用 \`\`\`chart 代码块，内容为**单行或多行 JSON**（合法 JSON 即可），字段：
+- \`type\`: \`"line"\`、\`"bar"\` 或 \`"pie"\`
+- \`data\`: 对象数组
+- 折线图/柱状图推荐提供：
+  - \`xKey\`: 横轴类别字段名
+  - \`series\`: \`[{ "key": "数值列名", "name": "图例名（可选）" }]\`，最多 8 条序列
+- 饼图推荐提供：
+  - \`nameKey\`: 名称字段名
+  - \`valueKey\`: 数值字段名
 - \`height\`: 可选，图表高度（像素，160–520）
+
+如果字段名清晰，也可以省略 \`xKey\`、\`series\`、\`nameKey\`、\`valueKey\`，系统会尝试自动推断。
 
 需要流程图/时序图等可用 \`\`\`mermaid 代码块。
 
@@ -737,6 +743,7 @@ export async function POST(req: NextRequest) {
 
           const cacheKey = `${toolCall.name}:${JSON.stringify(toolCall.args)}`;
           let result: ToolResult;
+          const { toolCache } = await getCaches();
 
           let cachedResult: ToolResult | null = null;
           try {

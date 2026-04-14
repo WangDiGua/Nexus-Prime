@@ -2,36 +2,35 @@
 
 import React, { useState } from 'react';
 import {
-  Database,
-  FileText,
-  Mail,
   BarChart3,
   ChevronRight,
   Cpu,
-  RefreshCw,
-  Play,
-  MessageSquare,
-  Layers,
-  SquarePen,
-  PanelLeft,
+  Database,
+  FileText,
   Globe,
+  Layers,
   LogIn,
+  Mail,
+  MessageSquare,
+  PanelLeft,
+  Play,
+  RefreshCw,
+  Sparkles,
+  SquarePen,
 } from 'lucide-react';
-import { NexusLogo } from '@/components/ui/nexus-logo';
-import { nexusPixelLogo } from '@/lib/fonts/pixel-logo';
-import { motion, AnimatePresence } from 'motion/react';
 import { useQuery } from '@tanstack/react-query';
-import { cn } from '@/lib/utils';
+import { NexusLogo } from '@/components/ui/nexus-logo';
+import { UserAccountMenu } from '@/components/layout/user-account-menu';
+import { Button } from '@/components/ui/button';
 import {
   Dialog,
   DialogContent,
   DialogDescription,
+  DialogFooter,
   DialogHeader,
   DialogTitle,
   DialogTrigger,
-  DialogFooter,
 } from '@/components/ui/dialog';
-import { Button } from '@/components/ui/button';
 import { Label } from '@/components/ui/label';
 import {
   Tooltip,
@@ -39,25 +38,28 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from '@/components/ui/tooltip';
-import { useRegistryStore } from '@/hooks/use-registry-store';
-import { useConversationStore } from '@/hooks/use-conversation-store';
-import { registryClient } from '@/lib/registry-client';
-import { Skill } from '@/types/registry';
-import ConversationList from '@/components/conversation/ConversationList';
-import { UserAccountMenu } from '@/components/layout/user-account-menu';
 import { useAuth } from '@/components/auth/auth-provider';
+import ConversationList from '@/components/conversation/ConversationList';
+import {
+  describeResourceValue,
+  groupSkillsByTask,
+} from '@/lib/agent-workbench';
+import { cn } from '@/lib/utils';
+import { nexusPixelLogo } from '@/lib/fonts/pixel-logo';
+import { registryClient } from '@/lib/registry-client';
+import { useConversationStore } from '@/hooks/use-conversation-store';
+import { useRegistryStore } from '@/hooks/use-registry-store';
+import { Resource, Skill } from '@/types/registry';
 
 type TabType = 'conversations' | 'resources';
 
 const sidebarClass =
-  'flex flex-col h-full min-h-0 bg-gpt-sidebar border-r border-gpt-border';
+  'flex h-full min-h-0 flex-col border-r border-gpt-border bg-gpt-sidebar';
 
 interface CapabilityHubProps {
   collapsed?: boolean;
   onToggleCollapse?: () => void;
-  /** 已登录时传入，用于退出登录 */
   onLogout?: () => void | Promise<void>;
-  /** 移动端抽屉内会话，新建后收起抽屉 */
   onCloseMobile?: () => void;
 }
 
@@ -72,13 +74,18 @@ export default function CapabilityHub({
   const [activeTab, setActiveTab] = useState<TabType>('conversations');
   const { user, isAuthenticated, isReady, openLogin } = useAuth();
   const { addPacket } = useRegistryStore();
-  const { activeConversationId, setActiveConversation, clearMessages } =
+  const { activeConversationId, clearMessages, setActiveConversation } =
     useConversationStore();
 
+  const resourcesEnabled = activeTab === 'resources';
   const { data, isLoading, refetch, isFetching } = useQuery({
     queryKey: ['capabilities'],
     queryFn: () => registryClient.fetchCapabilities(),
+    enabled: resourcesEnabled,
+    staleTime: 5 * 60 * 1000,
   });
+
+  const groupedSkills = groupSkillsByTask(data?.skills ?? []);
 
   const handleManualTrigger = async (skill: Skill) => {
     setIsTriggering(true);
@@ -87,14 +94,13 @@ export default function CapabilityHub({
     try {
       const result = await registryClient.remoteInvoke(skill, { manual: true });
       setTriggerResult(result);
-
       addPacket({
         id: Math.random().toString(36).substring(7),
         type: '技能',
         method: 'POST',
         endpoint: skill.endpoint,
         status: 200,
-        time: String(Date.now() - startTime) + 'ms',
+        time: `${Date.now() - startTime}ms`,
         payload: { manual: true, skill: skill.name },
         response: result,
       });
@@ -133,7 +139,7 @@ export default function CapabilityHub({
       type="button"
       onClick={() => setActiveTab(id)}
       className={cn(
-        'w-full flex items-center gap-3 rounded-lg px-3 py-2.5 text-left text-sm transition-colors',
+        'flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-left text-sm transition-colors',
         activeTab === id
           ? 'bg-black/[0.06] text-foreground dark:bg-white/10'
           : 'text-muted-foreground hover:bg-black/[0.04] dark:hover:bg-white/[0.05]',
@@ -147,7 +153,7 @@ export default function CapabilityHub({
   if (collapsed) {
     return (
       <TooltipProvider delay={200}>
-        <aside className={cn(sidebarClass, 'w-full items-center py-3 gap-1')}>
+        <aside className={cn(sidebarClass, 'w-full items-center gap-1 py-3')}>
           <div
             className="flex h-10 w-10 shrink-0 items-center justify-center text-foreground"
             title="Nexus-Prime"
@@ -171,7 +177,7 @@ export default function CapabilityHub({
               className={cn(
                 'flex h-10 w-10 items-center justify-center rounded-lg',
                 activeTab === 'conversations'
-                  ? 'bg-black/[0.06] dark:bg-white/10 text-foreground'
+                  ? 'bg-black/[0.06] text-foreground dark:bg-white/10'
                   : 'text-muted-foreground hover:bg-black/[0.06] dark:hover:bg-white/10',
               )}
               onClick={() => setActiveTab('conversations')}
@@ -186,23 +192,20 @@ export default function CapabilityHub({
               className={cn(
                 'flex h-10 w-10 items-center justify-center rounded-lg',
                 activeTab === 'resources'
-                  ? 'bg-black/[0.06] dark:bg-white/10 text-foreground'
+                  ? 'bg-black/[0.06] text-foreground dark:bg-white/10'
                   : 'text-muted-foreground hover:bg-black/[0.06] dark:hover:bg-white/10',
               )}
               onClick={() => setActiveTab('resources')}
             >
               <Layers size={20} />
             </TooltipTrigger>
-            <TooltipContent side="right">资源与能力</TooltipContent>
+            <TooltipContent side="right">任务能力中心</TooltipContent>
           </Tooltip>
 
-          <div className="flex-1 min-h-[1rem]" />
+          <div className="min-h-[1rem] flex-1" />
 
           {!isReady ? (
-            <div
-              className="h-9 w-9 shrink-0 animate-pulse rounded-lg bg-muted"
-              aria-hidden
-            />
+            <div className="h-9 w-9 shrink-0 animate-pulse rounded-lg bg-muted" aria-hidden />
           ) : isAuthenticated ? (
             <UserAccountMenu
               variant="collapsed"
@@ -252,6 +255,22 @@ export default function CapabilityHub({
         </TooltipProvider>
       </div>
 
+      <div className="px-3 pb-2">
+        <div className="rounded-2xl border border-border/70 bg-background/70 p-3">
+          <div className="flex items-start gap-2">
+            <div className="rounded-xl bg-primary/10 p-2 text-primary">
+              <Sparkles size={16} />
+            </div>
+            <div className="min-w-0">
+              <p className="text-sm font-medium text-foreground">任务能力中心</p>
+              <p className="mt-1 text-xs leading-5 text-muted-foreground">
+                先开始一段对话，再根据任务目标选择技能、资源和系统能力。
+              </p>
+            </div>
+          </div>
+        </div>
+      </div>
+
       <div className="flex flex-col gap-2 px-3 pb-2">
         <button
           type="button"
@@ -264,182 +283,244 @@ export default function CapabilityHub({
       </div>
 
       <div className="space-y-1 px-3 pb-2">
-        {navButton('conversations', '会话', MessageSquare)}
-        {navButton('resources', '资源与能力', Layers)}
+        {navButton('conversations', '最近会话', MessageSquare)}
+        {navButton('resources', '任务能力中心', Layers)}
       </div>
 
-      <div className="flex-1 min-h-0 overflow-hidden">
-        <AnimatePresence mode="wait">
-          {activeTab === 'conversations' ? (
-            <motion.div
-              key="conversations"
-              initial={{ opacity: 0, x: -8 }}
-              animate={{ opacity: 1, x: 0 }}
-              exit={{ opacity: 0, x: 8 }}
-              className="flex h-full min-h-0 flex-col"
-            >
-              <p className="shrink-0 px-3 pb-2 text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
-                最近
-              </p>
-              <ConversationList
-                activeConversationId={activeConversationId}
-                onSelectConversation={handleSelectConversation}
-                onNewConversation={handleNewConversation}
-                toolbarVariant="searchOnly"
-                density="compact"
-                authenticated={isReady && isAuthenticated}
-              />
-            </motion.div>
-          ) : (
-            <motion.div
-              key="resources"
-              initial={{ opacity: 0, x: 8 }}
-              animate={{ opacity: 1, x: 0 }}
-              exit={{ opacity: 0, x: -8 }}
-              className="h-full overflow-y-auto px-3 pb-4 scrollbar-none"
-            >
-              <div className="flex items-center justify-between px-1 pb-3 pt-1">
+      <div className="min-h-0 flex-1 overflow-hidden">
+        {activeTab === 'conversations' ? (
+          <div className="flex h-full min-h-0 flex-col">
+            <p className="shrink-0 px-3 pb-2 text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
+              最近
+            </p>
+            <ConversationList
+              activeConversationId={activeConversationId}
+              onSelectConversation={handleSelectConversation}
+              onNewConversation={handleNewConversation}
+              toolbarVariant="searchOnly"
+              density="compact"
+              authenticated={isReady && isAuthenticated}
+            />
+          </div>
+        ) : (
+          <div className="h-full overflow-y-auto px-3 pb-4 scrollbar-none">
+            <div className="flex items-center justify-between px-1 pb-3 pt-1">
+              <div>
                 <h4 className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
-                  系统资源
+                  当前能力
                 </h4>
-                <button
-                  type="button"
-                  onClick={() => refetch()}
-                  disabled={isFetching}
-                  className="rounded-md p-1.5 text-muted-foreground transition-colors hover:bg-black/[0.06] dark:hover:bg-white/10 disabled:opacity-50"
-                >
-                  <RefreshCw size={14} className={cn(isFetching && 'animate-spin')} />
-                </button>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  从任务目标出发，而不是从底层接口出发。
+                </p>
               </div>
+              <button
+                type="button"
+                onClick={() => void refetch()}
+                disabled={isFetching}
+                className="rounded-md p-1.5 text-muted-foreground transition-colors hover:bg-black/[0.06] dark:hover:bg-white/10 disabled:opacity-50"
+              >
+                <RefreshCw size={14} className={cn(isFetching && 'animate-spin')} />
+              </button>
+            </div>
 
-              {isLoading ? (
-                <div className="space-y-2 px-1">
-                  {[1, 2, 3].map((i) => (
-                    <div
-                      key={i}
-                      className="h-10 animate-pulse rounded-lg bg-black/[0.04] dark:bg-white/5"
-                    />
-                  ))}
-                </div>
-              ) : (
-                <div className="space-y-6">
-                  <div className="space-y-1">
-                    <h4 className="mb-2 px-1 text-[10px] font-semibold uppercase tracking-widest text-muted-foreground">
-                      MCP 服务器
-                    </h4>
-                    {data?.mcpServers.map((server: any) => {
+            {isLoading ? (
+              <div className="space-y-2 px-1">
+                {[1, 2, 3].map((i) => (
+                  <div
+                    key={i}
+                    className="h-10 animate-pulse rounded-lg bg-black/[0.04] dark:bg-white/5"
+                  />
+                ))}
+              </div>
+            ) : (
+              <div className="space-y-6">
+                <section className="space-y-2">
+                  <h4 className="px-1 text-[10px] font-semibold uppercase tracking-widest text-muted-foreground">
+                    已连接系统
+                  </h4>
+                  {(data?.mcpServers ?? []).length > 0 ? (
+                    data?.mcpServers.map((server) => {
                       const Icon = iconMap[server.icon] || Cpu;
                       return (
                         <div
                           key={server.id}
-                          className="flex cursor-pointer items-center gap-3 rounded-lg p-2 transition-colors hover:bg-black/[0.04] dark:hover:bg-white/5"
+                          className="flex items-center gap-3 rounded-lg p-2 hover:bg-black/[0.04] dark:hover:bg-white/5"
                         >
                           <div className="flex h-8 w-8 items-center justify-center rounded-md bg-black/[0.04] text-muted-foreground dark:bg-white/5">
                             <Icon size={16} />
                           </div>
-                          <span className="truncate text-sm text-foreground">
-                            {server.name}
-                          </span>
-                          <div className="ml-auto h-1.5 w-1.5 shrink-0 rounded-full bg-emerald-500/70" />
-                        </div>
-                      );
-                    })}
-                  </div>
-
-                  <div className="space-y-1">
-                    <h4 className="mb-2 px-1 text-[10px] font-semibold uppercase tracking-widest text-muted-foreground">
-                      远程技能
-                    </h4>
-                    {data?.skills.map((skill: Skill) => {
-                      const Icon = iconMap[skill.icon] || Globe;
-                      return (
-                        <div key={skill.id} className="group relative">
-                          <div className="flex cursor-pointer items-center gap-3 rounded-lg p-2 transition-colors hover:bg-black/[0.04] dark:hover:bg-white/5">
-                            <div className="flex h-8 w-8 items-center justify-center rounded-md bg-black/[0.04] text-muted-foreground dark:bg-white/5">
-                              <Icon size={16} />
-                            </div>
-                            <span className="text-sm text-foreground">{skill.name}</span>
-
-                            <Dialog>
-                              <DialogTrigger className="ml-auto rounded-md p-1.5 text-primary opacity-0 transition-all hover:bg-primary/10 group-hover:opacity-100">
-                                <Play size={12} fill="currentColor" />
-                              </DialogTrigger>
-                              <DialogContent className="ios-card max-w-md border-none">
-                                <DialogHeader>
-                                  <DialogTitle className="flex items-center gap-3 text-xl">
-                                    <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-primary/10 text-primary">
-                                      <Icon size={20} />
-                                    </div>
-                                    手动测试: {skill.name}
-                                  </DialogTitle>
-                                  <DialogDescription className="text-muted-foreground pt-2">
-                                    直接调用远程 Skill 接口进行连通性与逻辑验证。
-                                  </DialogDescription>
-                                </DialogHeader>
-                                <div className="space-y-4 py-4">
-                                  <div className="space-y-2">
-                                    <Label className="text-[10px] font-bold uppercase tracking-widest opacity-50">
-                                      接口地址
-                                    </Label>
-                                    <div className="ios-input font-mono text-[10px] text-primary truncate">
-                                      {skill.endpoint}
-                                    </div>
-                                  </div>
-                                  <div className="space-y-2">
-                                    <Label className="text-[10px] font-bold uppercase tracking-widest opacity-50">
-                                      测试负载 (JSON)
-                                    </Label>
-                                    <textarea
-                                      className="ios-input min-h-[120px] w-full font-mono text-xs focus:ring-primary/20"
-                                      placeholder='{ "test": true }'
-                                    />
-                                  </div>
-                                  {triggerResult && (
-                                    <div
-                                      className={cn(
-                                        'rounded-2xl border p-4 font-mono text-[10px] animate-ios-fade-in',
-                                        triggerResult.status === 'success'
-                                          ? 'border-emerald-500/20 bg-emerald-500/5 text-emerald-600'
-                                          : 'border-red-500/20 bg-red-500/5 text-red-600',
-                                      )}
-                                    >
-                                      <pre className="overflow-x-auto">
-                                        {JSON.stringify(triggerResult, null, 2)}
-                                      </pre>
-                                    </div>
-                                  )}
-                                </div>
-                                <DialogFooter>
-                                  <Button
-                                    onClick={() => handleManualTrigger(skill)}
-                                    disabled={isTriggering}
-                                    className="ios-button-primary w-full"
-                                  >
-                                    {isTriggering ? (
-                                      <RefreshCw size={16} className="mr-2 animate-spin" />
-                                    ) : (
-                                      <Play size={16} className="mr-2" />
-                                    )}
-                                    执行测试
-                                  </Button>
-                                </DialogFooter>
-                              </DialogContent>
-                            </Dialog>
-
-                            <ChevronRight
-                              size={14}
-                              className="text-muted-foreground opacity-0 group-hover:hidden"
-                            />
+                          <div className="min-w-0 flex-1">
+                            <p className="truncate text-sm text-foreground">{server.name}</p>
+                            <p className="text-xs text-muted-foreground">
+                              可作为本轮任务的外部工具来源
+                            </p>
+                          </div>
+                          <div className="rounded-full bg-emerald-500/10 px-2 py-1 text-[11px] text-emerald-600">
+                            {server.status}
                           </div>
                         </div>
                       );
-                    })}
+                    })
+                  ) : (
+                    <div className="rounded-xl border border-dashed border-border p-3 text-xs text-muted-foreground">
+                      还没有发现已连接系统，但你依然可以先进行普通对话。
+                    </div>
+                  )}
+                </section>
+
+                <section className="space-y-3">
+                  <div className="px-1">
+                    <h4 className="text-[10px] font-semibold uppercase tracking-widest text-muted-foreground">
+                      技能分组
+                    </h4>
+                    <p className="mt-1 text-xs text-muted-foreground">
+                      按任务目标查看，不再要求你先理解底层服务结构。
+                    </p>
                   </div>
-                </div>
-              )}
-            </motion.div>
-          )}
-        </AnimatePresence>
+
+                  {groupedSkills.length > 0 ? (
+                    groupedSkills.map(({ group, skills }) => (
+                      <div key={group.id} className="rounded-2xl border border-border/70 bg-background/70 p-3">
+                        <div className="mb-3">
+                          <p className="text-sm font-medium text-foreground">{group.title}</p>
+                          <p className="mt-1 text-xs leading-5 text-muted-foreground">
+                            {group.description}
+                          </p>
+                        </div>
+                        <div className="space-y-2">
+                          {skills.map((skill) => {
+                            const Icon = iconMap[skill.icon] || Globe;
+                            return (
+                              <div key={skill.id} className="group rounded-xl border border-border/60 bg-background/70 p-2">
+                                <div className="flex items-start gap-3">
+                                  <div className="mt-0.5 flex h-8 w-8 items-center justify-center rounded-md bg-black/[0.04] text-muted-foreground dark:bg-white/5">
+                                    <Icon size={16} />
+                                  </div>
+                                  <div className="min-w-0 flex-1">
+                                    <p className="text-sm font-medium text-foreground">{skill.name}</p>
+                                    <p className="mt-1 text-xs leading-5 text-muted-foreground">
+                                      {skill.description || '适合作为当前任务的专用工具入口。'}
+                                    </p>
+                                  </div>
+                                  <Dialog>
+                                    <DialogTrigger className="rounded-md p-1.5 text-primary transition-all hover:bg-primary/10">
+                                      <Play size={12} fill="currentColor" />
+                                    </DialogTrigger>
+                                    <DialogContent className="ios-card max-w-md border-none">
+                                      <DialogHeader>
+                                        <DialogTitle className="flex items-center gap-3 text-xl">
+                                          <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-primary/10 text-primary">
+                                            <Icon size={20} />
+                                          </div>
+                                          高级调试：{skill.name}
+                                        </DialogTitle>
+                                        <DialogDescription className="pt-2 text-muted-foreground">
+                                          这里保留给高级用户做连通性测试。普通使用场景下，建议直接在聊天区描述任务。
+                                        </DialogDescription>
+                                      </DialogHeader>
+                                      <div className="space-y-4 py-4">
+                                        <div className="space-y-2">
+                                          <Label className="text-[10px] font-bold uppercase tracking-widest opacity-50">
+                                            接口地址
+                                          </Label>
+                                          <div className="ios-input truncate font-mono text-[10px] text-primary">
+                                            {skill.endpoint}
+                                          </div>
+                                        </div>
+                                        <div className="space-y-2">
+                                          <Label className="text-[10px] font-bold uppercase tracking-widest opacity-50">
+                                            测试负载（JSON）
+                                          </Label>
+                                          <textarea
+                                            className="ios-input min-h-[120px] w-full font-mono text-xs focus:ring-primary/20"
+                                            placeholder='{ "test": true }'
+                                          />
+                                        </div>
+                                        {triggerResult ? (
+                                          <div
+                                            className={cn(
+                                              'animate-ios-fade-in rounded-2xl border p-4 font-mono text-[10px]',
+                                              triggerResult.status === 'success'
+                                                ? 'border-emerald-500/20 bg-emerald-500/5 text-emerald-600'
+                                                : 'border-red-500/20 bg-red-500/5 text-red-600',
+                                            )}
+                                          >
+                                            <pre className="overflow-x-auto">
+                                              {JSON.stringify(triggerResult, null, 2)}
+                                            </pre>
+                                          </div>
+                                        ) : null}
+                                      </div>
+                                      <DialogFooter>
+                                        <Button
+                                          onClick={() => void handleManualTrigger(skill)}
+                                          disabled={isTriggering}
+                                          className="ios-button-primary w-full"
+                                        >
+                                          {isTriggering ? (
+                                            <RefreshCw size={16} className="mr-2 animate-spin" />
+                                          ) : (
+                                            <Play size={16} className="mr-2" />
+                                          )}
+                                          执行测试
+                                        </Button>
+                                      </DialogFooter>
+                                    </DialogContent>
+                                  </Dialog>
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    ))
+                  ) : (
+                    <div className="rounded-xl border border-dashed border-border p-3 text-xs text-muted-foreground">
+                      当前没有可展示的技能列表。
+                    </div>
+                  )}
+                </section>
+
+                <section className="space-y-3">
+                  <div className="px-1">
+                    <h4 className="text-[10px] font-semibold uppercase tracking-widest text-muted-foreground">
+                      资源卡片
+                    </h4>
+                    <p className="mt-1 text-xs text-muted-foreground">
+                      每个资源都补充“适用场景、输入要求、预期输出”，帮助首次使用的人快速上手。
+                    </p>
+                  </div>
+                  {(data?.resources ?? []).slice(0, 6).map((resource: Resource) => {
+                    const resourceInfo = describeResourceValue(resource);
+                    return (
+                      <div
+                        key={resource.id}
+                        className="rounded-2xl border border-border/70 bg-background/70 p-3"
+                      >
+                        <div className="flex items-start justify-between gap-3">
+                          <div className="min-w-0">
+                            <p className="text-sm font-medium text-foreground">
+                              {resource.name}
+                            </p>
+                            <p className="mt-1 text-xs leading-5 text-muted-foreground">
+                              {resource.description || '可在 Agent 工作台中复用的任务资源。'}
+                            </p>
+                          </div>
+                          <ChevronRight size={14} className="mt-1 shrink-0 text-muted-foreground" />
+                        </div>
+                        <div className="mt-3 space-y-2 text-xs leading-5 text-muted-foreground">
+                          <p>适用场景：{resourceInfo.scenario}</p>
+                          <p>输入要求：{resourceInfo.input}</p>
+                          <p>预期输出：{resourceInfo.output}</p>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </section>
+              </div>
+            )}
+          </div>
+        )}
       </div>
 
       <div className="shrink-0 border-t border-gpt-border p-3">

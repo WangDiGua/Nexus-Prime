@@ -1,31 +1,49 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import dynamic from 'next/dynamic';
+import { memo, useMemo } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
-import {
-  oneDark,
-  oneLight,
-} from 'react-syntax-highlighter/dist/esm/styles/prism';
 import type { Components } from 'react-markdown';
 import { cn } from '@/lib/utils';
-import { MermaidDiagram } from '@/components/chat/MermaidDiagram';
-import { RechartsBlock } from '@/components/chat/RechartsBlock';
-import { HtmlCodeBlock } from '@/components/chat/HtmlCodeBlock';
+import { LazySyntaxCodeBlock } from '@/components/chat/LazySyntaxCodeBlock';
+import { useDarkMode } from '@/hooks/use-dark-mode';
 
-function useIsDark() {
-  const [dark, setDark] = useState(false);
-  useEffect(() => {
-    const root = document.documentElement;
-    const sync = () => setDark(root.classList.contains('dark'));
-    sync();
-    const mo = new MutationObserver(sync);
-    mo.observe(root, { attributes: true, attributeFilter: ['class'] });
-    return () => mo.disconnect();
-  }, []);
-  return dark;
-}
+const MermaidDiagram = dynamic(
+  () => import('@/components/chat/MermaidDiagram').then((mod) => mod.MermaidDiagram),
+  {
+    ssr: false,
+    loading: () => (
+      <div className="my-4 rounded-lg border border-border bg-muted/30 p-4 text-sm text-muted-foreground">
+        正在加载 Mermaid 渲染器...
+      </div>
+    ),
+  },
+);
+
+const RechartsBlock = dynamic(
+  () => import('@/components/chat/RechartsBlock').then((mod) => mod.RechartsBlock),
+  {
+    ssr: false,
+    loading: () => (
+      <div className="my-4 rounded-lg border border-border bg-muted/30 p-4 text-sm text-muted-foreground">
+        正在加载图表渲染器...
+      </div>
+    ),
+  },
+);
+
+const HtmlCodeBlock = dynamic(
+  () => import('@/components/chat/HtmlCodeBlock').then((mod) => mod.HtmlCodeBlock),
+  {
+    ssr: false,
+    loading: () => (
+      <div className="my-4 rounded-lg border border-border bg-muted/30 p-4 text-sm text-muted-foreground">
+        正在加载 HTML 预览...
+      </div>
+    ),
+  },
+);
 
 const prismLanguageAlias: Record<string, string> = {
   sh: 'bash',
@@ -41,7 +59,6 @@ function normalizeLanguage(lang: string): string {
   return prismLanguageAlias[lower] ?? lower;
 }
 
-/** 不依赖 tailwind typography 插件，保证助手消息有清晰标题/列表/段落层次 */
 function mdText(isUser: boolean) {
   return isUser ? 'text-primary-foreground/95' : 'text-foreground/95';
 }
@@ -50,7 +67,7 @@ function mdHeading(isUser: boolean) {
   return isUser ? 'text-primary-foreground' : 'text-foreground';
 }
 
-export function MarkdownContent({
+function MarkdownContentImpl({
   content,
   variant,
 }: {
@@ -58,8 +75,7 @@ export function MarkdownContent({
   variant: 'user' | 'assistant';
 }) {
   const isUser = variant === 'user';
-  const isDark = useIsDark();
-  const codeStyle = isUser ? oneDark : isDark ? oneDark : oneLight;
+  const isDark = useDarkMode();
 
   const components: Components = useMemo(
     () => ({
@@ -147,7 +163,6 @@ export function MarkdownContent({
             className={cn(
               'my-2.5 leading-[1.65] first:mt-0 last:mb-0',
               mdText(isUser),
-              // 常见「整行只有 **小标题**」：抬成伪标题层次
               '[&:has(>strong:only-child)]:mb-2 [&:has(>strong:only-child)]:mt-4 first:[&:has(>strong:only-child)]:mt-0',
               '[&:has(>strong:only-child)>strong]:text-base [&:has(>strong:only-child)>strong]:font-semibold',
               '[&:has(>strong:only-child)>strong]:tracking-tight',
@@ -191,7 +206,10 @@ export function MarkdownContent({
       li({ children, ...props }) {
         return (
           <li
-            className={cn('leading-relaxed [&>p]:my-1 [&>p:first-child]:mt-0', mdText(isUser))}
+            className={cn(
+              'leading-relaxed [&>p]:my-1 [&>p:first-child]:mt-0',
+              mdText(isUser),
+            )}
             {...props}
           >
             {children}
@@ -199,19 +217,11 @@ export function MarkdownContent({
         );
       },
       hr({ ...props }) {
-        return (
-          <hr
-            className="my-6 border-0 border-t border-border/80"
-            {...props}
-          />
-        );
+        return <hr className="my-6 border-0 border-t border-border/80" {...props} />;
       },
       strong({ children, ...props }) {
         return (
-          <strong
-            className={cn('font-semibold', mdHeading(isUser))}
-            {...props}
-          >
+          <strong className={cn('font-semibold', mdHeading(isUser))} {...props}>
             {children}
           </strong>
         );
@@ -260,7 +270,6 @@ export function MarkdownContent({
           return (
             <HtmlCodeBlock
               codeText={codeText}
-              style={codeStyle}
               language="markup"
               isUser={isUser}
             />
@@ -270,23 +279,12 @@ export function MarkdownContent({
         const prismLang = normalizeLanguage(lang);
 
         return (
-          <SyntaxHighlighter
+          <LazySyntaxCodeBlock
+            codeText={codeText}
             language={prismLang}
-            style={codeStyle}
-            PreTag="div"
-            customStyle={{
-              margin: '0.75rem 0',
-              borderRadius: '0.5rem',
-              fontSize: '0.8125rem',
-              lineHeight: 1.55,
-            }}
-            codeTagProps={{
-              className: 'font-mono',
-              style: { fontFamily: 'ui-monospace, monospace' },
-            }}
-          >
-            {codeText}
-          </SyntaxHighlighter>
+            isUser={isUser}
+            isDark={isDark}
+          />
         );
       },
       table({ children, ...props }) {
@@ -336,7 +334,7 @@ export function MarkdownContent({
         );
       },
     }),
-    [codeStyle, isDark, isUser],
+    [isDark, isUser],
   );
 
   return (
@@ -345,3 +343,5 @@ export function MarkdownContent({
     </ReactMarkdown>
   );
 }
+
+export const MarkdownContent = memo(MarkdownContentImpl);

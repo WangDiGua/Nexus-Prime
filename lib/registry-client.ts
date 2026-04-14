@@ -1,4 +1,4 @@
-import { Skill, McpServer, Resource } from '@/types/registry';
+import { McpServer, Resource, Skill } from '@/types/registry';
 
 class RegistryClient {
   private baseUrl: string;
@@ -7,27 +7,32 @@ class RegistryClient {
     this.baseUrl = typeof window !== 'undefined' ? '/api' : '';
   }
 
-  async fetchCapabilities(): Promise<{ mcpServers: McpServer[], skills: Skill[], resources: Resource[] }> {
+  async fetchCapabilities(): Promise<{
+    mcpServers: McpServer[];
+    skills: Skill[];
+    resources: Resource[];
+  }> {
     try {
       const [toolsRes, resourcesRes] = await Promise.all([
         fetch(`${this.baseUrl}/tools`),
         fetch(`${this.baseUrl}/resources`),
       ]);
 
-      const toolsData = toolsRes.ok ? await toolsRes.json() : { data: { tools: [], routes: [] } };
-      const resourcesData = resourcesRes.ok ? await resourcesRes.json() : { data: { items: [] } };
+      const toolsData = toolsRes.ok
+        ? await toolsRes.json()
+        : { data: { tools: [], routes: [] } };
+      const resourcesData = resourcesRes.ok
+        ? await resourcesRes.json()
+        : { data: { items: [] } };
 
       const tools = toolsData.data?.tools || [];
-      const routes = toolsData.data?.routes || [];
       const resources = resourcesData.data?.items || [];
-
-      const mcpServers: McpServer[] = [];
       const serverMap = new Map<string, McpServer>();
 
       for (const tool of tools) {
         const meta = tool._lantu;
         if (meta && meta.resourceType === 'mcp') {
-          const serverId = meta.resourceId;
+          const serverId = String(meta.resourceId || 'mcp-server');
           if (!serverMap.has(serverId)) {
             serverMap.set(serverId, {
               id: serverId,
@@ -38,21 +43,21 @@ class RegistryClient {
           }
         }
       }
-      
-      for (const server of serverMap.values()) {
-        mcpServers.push(server);
-      }
 
       const skills: Skill[] = tools.map((tool: any) => ({
         id: tool.function.name,
         name: tool.function.name,
-        type: tool._lantu?.resourceType || '远程',
+        type: tool._lantu?.resourceType === 'skill' ? '远程' : '本地',
         icon: 'Zap',
         endpoint: `/invoke/${tool.function.name}`,
-        description: tool.function.description,
+        description: tool.function.description || '可在当前会话中直接调用的工具能力。',
       }));
 
-      return { mcpServers, skills, resources };
+      return {
+        mcpServers: Array.from(serverMap.values()),
+        skills,
+        resources,
+      };
     } catch (error) {
       console.error('Failed to fetch capabilities:', error);
       return { mcpServers: [], skills: [], resources: [] };

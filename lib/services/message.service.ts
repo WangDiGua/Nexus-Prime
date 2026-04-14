@@ -1,8 +1,7 @@
 import { prisma } from '@/lib/db/prisma';
 import { getAuthUser } from '@/lib/auth/auth-service';
-import { vectorService } from '@/lib/vector/milvus';
-import { embeddingService } from '@/lib/vector/embedding';
 import { Prisma } from '@prisma/client';
+import { getVectorServices } from '@/lib/runtime/lazy-services';
 
 export interface CreateMessageData {
   conversationId: string;
@@ -97,6 +96,7 @@ export class MessageService {
 
     if (data.storeVector !== false && data.content.trim()) {
       try {
+        const { embeddingService, vectorService } = await getVectorServices();
         const embeddingResult = await embeddingService.embed(data.content);
         await vectorService.insertVector({
           id: message.id,
@@ -188,6 +188,7 @@ export class MessageService {
     await prisma.message.delete({ where: { id } });
     
     try {
+      const { vectorService } = await getVectorServices();
       await vectorService.deleteByMessageId(id);
     } catch (error) {
       console.error('[VectorStore] Failed to delete vector:', error);

@@ -1,5 +1,6 @@
-import { lantuClient, LantuTool } from './lantu-client';
+import type { LantuTool } from './lantu-client';
 import { ToolCall, ToolResult } from '@/types/chat';
+import { getLantuClient } from '@/lib/runtime/lazy-services';
 
 function cleanMarkdownFormatting(value: unknown): unknown {
   if (typeof value === 'string') {
@@ -107,6 +108,7 @@ export class ToolExecutor {
         payload = cleanedArgs;
       }
 
+      const lantuClient = await getLantuClient();
       const response = await lantuClient.invoke({
         resourceType: route.resourceType,
         resourceId: route.resourceId,
@@ -170,6 +172,7 @@ export async function createToolExecutor(
   entryResourceType?: string,
   entryResourceId?: string
 ): Promise<ToolExecutor> {
+  const lantuClient = await getLantuClient();
   const { tools, routes } = await lantuClient.fetchAggregatedTools(
     entryResourceType,
     entryResourceId

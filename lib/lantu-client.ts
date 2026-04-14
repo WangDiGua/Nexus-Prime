@@ -96,7 +96,7 @@ function parseBodyString(body: string | undefined): unknown {
   }
 }
 
-class LantuClient {
+export class LantuClient {
   private config: ApiConfig;
   private core: LantuConnectClient | null = null;
 

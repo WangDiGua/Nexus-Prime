@@ -14,11 +14,18 @@ export default function ChatPage() {
    * 默认 true：移动端首屏即收起，避免 false 时整屏抽屉盖住主内容。
    * 挂载后若视口 >= md，再展开为桌面常规侧栏宽度。
    */
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(() => {
-    if (typeof window === 'undefined') return true;
-    return window.innerWidth < MOBILE_BREAKPOINT;
-  });
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(true);
   const { openRegister } = useAuth();
+
+  useEffect(() => {
+    const syncSidebarCollapsed = () => {
+      setSidebarCollapsed(window.innerWidth < MOBILE_BREAKPOINT);
+    };
+
+    syncSidebarCollapsed();
+    window.addEventListener('resize', syncSidebarCollapsed);
+    return () => window.removeEventListener('resize', syncSidebarCollapsed);
+  }, []);
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);

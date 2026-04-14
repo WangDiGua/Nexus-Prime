@@ -4,14 +4,15 @@ const globalForMilvus = globalThis as unknown as {
   milvus: MilvusClient | undefined;
 };
 
-export const milvus =
-  globalForMilvus.milvus ??
-  new MilvusClient({
-    address: process.env.MILVUS_ADDRESS || 'localhost:19530',
-    token: process.env.MILVUS_TOKEN || undefined,
-  });
-
-if (process.env.NODE_ENV !== 'production') globalForMilvus.milvus = milvus;
+export function getMilvusClient(): MilvusClient {
+  if (!globalForMilvus.milvus) {
+    globalForMilvus.milvus = new MilvusClient({
+      address: process.env.MILVUS_ADDRESS || 'localhost:19530',
+      token: process.env.MILVUS_TOKEN || undefined,
+    });
+  }
+  return globalForMilvus.milvus;
+}
 
 export interface MessageVector {
   id: string;
@@ -28,6 +29,7 @@ export const COLLECTION_NAME = 'conversation_messages';
 export const VECTOR_DIMENSION = parseInt(process.env.VECTOR_DIMENSION || '1536', 10);
 
 export async function initVectorCollection(): Promise<void> {
+  const milvus = getMilvusClient();
   const hasCollection = await milvus.hasCollection({ collection_name: COLLECTION_NAME });
   
   if (!hasCollection.value) {
@@ -109,6 +111,7 @@ export async function initVectorCollection(): Promise<void> {
 
 export class VectorService {
   async insertVector(data: MessageVector): Promise<void> {
+    const milvus = getMilvusClient();
     await milvus.insert({
       collection_name: COLLECTION_NAME,
       data: [data] as any,
@@ -117,6 +120,7 @@ export class VectorService {
 
   async insertVectors(data: MessageVector[]): Promise<void> {
     if (data.length === 0) return;
+    const milvus = getMilvusClient();
     await milvus.insert({
       collection_name: COLLECTION_NAME,
       data: data as any,
@@ -133,6 +137,7 @@ export class VectorService {
     } = {}
   ): Promise<Array<{ id: string; messageId: string; score: number; content: string; metadata: Record<string, unknown> }>> {
     const { userId, conversationId, topK = 10 } = options;
+    const milvus = getMilvusClient();
     
     const filter: string[] = [];
     if (userId) {
@@ -171,6 +176,7 @@ export class VectorService {
   }
 
   async deleteByMessageId(messageId: string): Promise<void> {
+    const milvus = getMilvusClient();
     await milvus.deleteEntities({
       collection_name: COLLECTION_NAME,
       filter: `messageId == "${messageId}"`,
@@ -178,6 +184,7 @@ export class VectorService {
   }
 
   async deleteByConversationId(conversationId: string): Promise<void> {
+    const milvus = getMilvusClient();
     await milvus.deleteEntities({
       collection_name: COLLECTION_NAME,
       filter: `conversationId == "${conversationId}"`,
@@ -185,6 +192,7 @@ export class VectorService {
   }
 
   async deleteByUserId(userId: string): Promise<void> {
+    const milvus = getMilvusClient();
     await milvus.deleteEntities({
       collection_name: COLLECTION_NAME,
       filter: `userId == "${userId}"`,
@@ -192,6 +200,7 @@ export class VectorService {
   }
 
   async getStats(): Promise<{ total: number }> {
+    const milvus = getMilvusClient();
     const stats = await milvus.getCollectionStatistics({
       collection_name: COLLECTION_NAME,
     });
@@ -202,4 +211,4 @@ export class VectorService {
 }
 
 export const vectorService = new VectorService();
-export default milvus;
+export default getMilvusClient;

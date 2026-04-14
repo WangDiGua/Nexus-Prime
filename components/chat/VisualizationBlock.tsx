@@ -1,29 +1,19 @@
-﻿'use client';
+'use client';
 
 import { useEffect, useMemo, useRef, useState } from 'react';
 import * as echarts from 'echarts';
 import { AlertTriangle, FileJson2, Table2 } from 'lucide-react';
 import { cn } from '@/lib/utils';
+import { useDarkMode } from '@/hooks/use-dark-mode';
 import {
   asVisualizationSourceRows,
+  buildFallbackEChartsOption,
   extractVisualizationMessage,
+  resolveRenderableEChartsOption,
   stringifyVisualizationJson,
   type VisualizationMessage,
   type VisualizationPayload,
 } from '@/lib/visualization';
-
-function useIsDark() {
-  const [dark, setDark] = useState(false);
-  useEffect(() => {
-    const root = document.documentElement;
-    const sync = () => setDark(root.classList.contains('dark'));
-    sync();
-    const mo = new MutationObserver(sync);
-    mo.observe(root, { attributes: true, attributeFilter: ['class'] });
-    return () => mo.disconnect();
-  }, []);
-  return dark;
-}
 
 function isVisualizationPayload(
   message: VisualizationMessage | null,
@@ -61,7 +51,7 @@ function VisualizationFallbackView({
         ) : (
           <FileJson2 className="size-4 text-muted-foreground" aria-hidden />
         )}
-        鍏滃簳灞曠ず
+        兜底展示
       </div>
       {sourceRows.length > 0 ? (
         <div className="overflow-x-auto">
@@ -111,11 +101,17 @@ export function VisualizationBlock({
   payload: unknown;
   className?: string;
 }) {
-  const dark = useIsDark();
+  const dark = useDarkMode();
   const chartRef = useRef<HTMLDivElement | null>(null);
   const [renderError, setRenderError] = useState<string | null>(null);
 
   const message = useMemo(() => extractVisualizationMessage(payload), [payload]);
+  const renderOption = useMemo(() => {
+    if (!message || !isVisualizationPayload(message) || message.renderer !== 'echarts') {
+      return null;
+    }
+    return resolveRenderableEChartsOption(message);
+  }, [message]);
 
   useEffect(() => {
     if (!message || !isVisualizationPayload(message)) return;
@@ -128,28 +124,37 @@ export function VisualizationBlock({
       window.setTimeout(() => setRenderError(value), 0);
     };
 
+    if (!renderOption) {
+      scheduleRenderError('缺少可渲染的图表配置');
+      return;
+    }
+
     let disposed = false;
     let chart: echarts.ECharts | null = null;
     let resizeObserver: ResizeObserver | null = null;
+
+    const bindResize = () => {
+      const resize = () => chart?.resize();
+      if (typeof ResizeObserver !== 'undefined' && chartRef.current) {
+        resizeObserver = new ResizeObserver(() => resize());
+        resizeObserver.observe(chartRef.current);
+      }
+      window.addEventListener('resize', resize);
+      return resize;
+    };
 
     try {
       chart = echarts.init(chartRef.current, dark ? 'dark' : undefined, {
         renderer: 'canvas',
       });
-      chart.setOption(message.chart.spec.option, {
+      chart.setOption(renderOption, {
         notMerge: true,
         lazyUpdate: true,
         silent: false,
       });
       scheduleRenderError(null);
 
-      const resize = () => chart?.resize();
-      if (typeof ResizeObserver !== 'undefined') {
-        resizeObserver = new ResizeObserver(() => resize());
-        resizeObserver.observe(chartRef.current);
-      }
-      window.addEventListener('resize', resize);
-
+      const resize = bindResize();
       return () => {
         if (disposed) return;
         disposed = true;
@@ -158,18 +163,50 @@ export function VisualizationBlock({
         chart?.dispose();
       };
     } catch (error) {
+      const fallbackOption = buildFallbackEChartsOption(message);
+      if (fallbackOption) {
+        try {
+          chart?.dispose();
+          chart = echarts.init(chartRef.current, dark ? 'dark' : undefined, {
+            renderer: 'canvas',
+          });
+          chart.setOption(fallbackOption, {
+            notMerge: true,
+            lazyUpdate: true,
+            silent: false,
+          });
+          scheduleRenderError(null);
+
+          const resize = bindResize();
+          return () => {
+            if (disposed) return;
+            disposed = true;
+            resizeObserver?.disconnect();
+            window.removeEventListener('resize', resize);
+            chart?.dispose();
+          };
+        } catch {
+          // fall through to the original error below
+        }
+      }
+
       scheduleRenderError(error instanceof Error ? error.message : '图表渲染失败');
       chart?.dispose();
       return undefined;
     }
-  }, [dark, message]);
+  }, [dark, message, renderOption]);
 
   if (!message) {
     return (
-      <div className={cn('mt-3 rounded-xl border border-destructive/30 bg-destructive/5 p-3 text-sm text-destructive', className)}>
+      <div
+        className={cn(
+          'mt-3 rounded-xl border border-destructive/30 bg-destructive/5 p-3 text-sm text-destructive',
+          className,
+        )}
+      >
         <div className="flex items-center gap-2 font-medium">
           <AlertTriangle className="size-4" aria-hidden />
-          鍥捐〃娑堟伅鏃犳晥
+          图表消息无效
         </div>
         <pre className="mt-2 overflow-auto text-xs leading-relaxed text-destructive/90">
           {stringifyVisualizationJson(payload)}
@@ -201,7 +238,6 @@ export function VisualizationBlock({
     );
   }
 
-
   return (
     <div className={cn('mt-3 rounded-xl border border-border bg-background/70 p-3', className)}>
       <div className="flex items-start gap-3">
@@ -228,7 +264,7 @@ export function VisualizationBlock({
 
       {renderError ? (
         <div className="mt-3 rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive">
-          鍥捐〃娓叉煋澶辫触: {renderError}
+          图表渲染失败: {renderError}
           <VisualizationFallbackView message={message} />
         </div>
       ) : (
@@ -240,4 +276,3 @@ export function VisualizationBlock({
     </div>
   );
 }
-

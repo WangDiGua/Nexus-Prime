@@ -1,8 +1,6 @@
 'use client';
 
 import { useCallback, useEffect, useState } from 'react';
-import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
-import type { SyntaxHighlighterProps } from 'react-syntax-highlighter';
 import { AppWindow, PictureInPicture2 } from 'lucide-react';
 import {
   Dialog,
@@ -14,15 +12,15 @@ import {
 import { Button } from '@/components/ui/button';
 import { toast } from '@/lib/toast';
 import { cn } from '@/lib/utils';
+import { LazySyntaxCodeBlock } from '@/components/chat/LazySyntaxCodeBlock';
+import { useDarkMode } from '@/hooks/use-dark-mode';
 
 type HtmlCodeBlockProps = {
   codeText: string;
-  style: SyntaxHighlighterProps['style'];
   language: string;
   isUser: boolean;
 };
 
-/** Blob 内文档不受全局 CSS 影响，注入样式以隐藏滚动条并保留滚动 */
 function injectPreviewScrollbarHide(html: string): string {
   const style =
     '<style data-nexus-preview>html,body{scrollbar-width:none;-ms-overflow-style:none}html::-webkit-scrollbar,body::-webkit-scrollbar{width:0;height:0}</style>';
@@ -31,26 +29,28 @@ function injectPreviewScrollbarHide(html: string): string {
     return t.replace(/<head([^>]*)>/i, '<head$1>' + style);
   }
   if (/<html[^>]*>\s*<body/i.test(t)) {
-    return t.replace(/<html([^>]*)>/i, '<html$1><head><meta charset="utf-8"/>' + style + '</head>');
+    return t.replace(
+      /<html([^>]*)>/i,
+      '<html$1><head><meta charset="utf-8"/>' + style + '</head>',
+    );
   }
   if (/<html[\s>]/i.test(t)) {
-    return t.replace(/<html([^>]*)>/i, '<html$1><head><meta charset="utf-8"/>' + style + '</head>');
+    return t.replace(
+      /<html([^>]*)>/i,
+      '<html$1><head><meta charset="utf-8"/>' + style + '</head>',
+    );
   }
   return `<!DOCTYPE html><html><head><meta charset="utf-8"/>${style}</head><body>${t}</body></html>`;
 }
 
-/**
- * HTML 代码块：语法高亮 + 新窗口 Blob 预览 + 沙箱 iframe 预览。
- * 沙箱限制部分能力，复杂页面建议用「新窗口预览」。
- */
 export function HtmlCodeBlock({
   codeText,
-  style,
   language,
   isUser,
 }: HtmlCodeBlockProps) {
   const [sandboxOpen, setSandboxOpen] = useState(false);
   const [blobUrl, setBlobUrl] = useState<string | null>(null);
+  const isDark = useDarkMode();
 
   const openInNewWindow = useCallback(() => {
     const blob = new Blob([injectPreviewScrollbarHide(codeText)], {
@@ -146,23 +146,14 @@ export function HtmlCodeBlock({
             </Button>
           </div>
         </div>
-        <SyntaxHighlighter
-          language={language}
-          style={style}
-          PreTag="div"
-          customStyle={{
-            margin: 0,
-            borderRadius: 0,
-            fontSize: '0.8125rem',
-            lineHeight: 1.55,
-          }}
-          codeTagProps={{
-            className: 'font-mono',
-            style: { fontFamily: 'ui-monospace, monospace' },
-          }}
-        >
-          {codeText}
-        </SyntaxHighlighter>
+        <div className="px-3 pb-3">
+          <LazySyntaxCodeBlock
+            codeText={codeText}
+            language={language}
+            isUser={isUser}
+            isDark={isDark}
+          />
+        </div>
       </div>
 
       <Dialog open={sandboxOpen} onOpenChange={handleSandboxOpenChange}>
@@ -170,7 +161,7 @@ export function HtmlCodeBlock({
           <DialogHeader>
             <DialogTitle>HTML 沙箱预览</DialogTitle>
             <DialogDescription>
-              在 iframe 沙箱中运行，部分 API（如部分跨域资源）可能受限；完整效果请使用「新窗口预览」。
+              在 iframe 沙箱中运行，部分 API（如跨域资源）可能受限；完整效果请使用“新窗口预览”。
             </DialogDescription>
           </DialogHeader>
           {blobUrl ? (

@@ -2,25 +2,13 @@
 
 import { useEffect, useId, useRef, useState } from 'react';
 import mermaid from 'mermaid';
-
-function useIsDark() {
-  const [dark, setDark] = useState(false);
-  useEffect(() => {
-    const root = document.documentElement;
-    const sync = () => setDark(root.classList.contains('dark'));
-    sync();
-    const mo = new MutationObserver(sync);
-    mo.observe(root, { attributes: true, attributeFilter: ['class'] });
-    return () => mo.disconnect();
-  }, []);
-  return dark;
-}
+import { useDarkMode } from '@/hooks/use-dark-mode';
 
 export function MermaidDiagram({ chart }: { chart: string }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const baseId = useId().replace(/:/g, '');
   const [error, setError] = useState<string | null>(null);
-  const isDark = useIsDark();
+  const isDark = useDarkMode();
 
   useEffect(() => {
     const el = containerRef.current;

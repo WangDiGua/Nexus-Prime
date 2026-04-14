@@ -1,14 +1,30 @@
-﻿'use client';
+'use client';
 
-import { AlertTriangle, Copy, RotateCcw } from 'lucide-react';
-import { cn } from '@/lib/utils';
+import dynamic from 'next/dynamic';
+import { AlertTriangle, CheckCircle2, Copy, RotateCcw, Wrench } from 'lucide-react';
 import { MarkdownContent } from '@/components/chat/MarkdownContent';
-import { VisualizationBlock } from '@/components/chat/VisualizationBlock';
+import { summarizeToolInvocation } from '@/lib/agent-workbench';
+import { cn } from '@/lib/utils';
 import {
   extractVisualizationMessage,
   stringifyVisualizationJson,
 } from '@/lib/visualization';
 import type { ToolInvocationView } from '@/types/chat';
+
+const VisualizationBlock = dynamic(
+  () =>
+    import('@/components/chat/VisualizationBlock').then(
+      (mod) => mod.VisualizationBlock,
+    ),
+  {
+    ssr: false,
+    loading: () => (
+      <div className="mt-3 rounded-xl border border-border bg-background/70 p-3 text-sm text-muted-foreground">
+        正在加载图表渲染器...
+      </div>
+    ),
+  },
+);
 
 interface Message {
   id: string;
@@ -28,60 +44,70 @@ function ToolInvocationCard({
 }: {
   invocation: NonNullable<Message['toolInvocations']>[number];
 }) {
+  const delivery = summarizeToolInvocation(invocation);
   const result = invocation.result;
   const visualization = result ? extractVisualizationMessage(result.result) : null;
+  const toneClass =
+    delivery.tone === 'success'
+      ? 'border-emerald-500/20 bg-emerald-500/[0.04]'
+      : delivery.tone === 'error'
+        ? 'border-destructive/30 bg-destructive/[0.04]'
+        : 'border-border bg-muted/20';
 
   return (
-    <div className="rounded-xl border border-border bg-muted/20 p-3">
-      <div className="flex flex-wrap items-start justify-between gap-2">
-        <div>
+    <div className={cn('rounded-2xl border p-3', toneClass)}>
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-center gap-2">
-            <span className="text-sm font-medium text-foreground">
-              {invocation.toolName}
+            <span className="inline-flex items-center gap-1 text-sm font-medium text-foreground">
+              <Wrench className="size-4 opacity-75" />
+              {delivery.title}
             </span>
-            <span className="rounded-full bg-muted px-2 py-0.5 text-[11px] font-medium text-muted-foreground">
-              {invocation.state === 'calling'
-                ? '调用中'
-                : result?.status === 'success'
-                  ? '成功'
-                  : '失败'}
+            <span className="rounded-full bg-background/80 px-2 py-0.5 text-[11px] font-medium text-muted-foreground">
+              {delivery.statusLabel}
             </span>
           </div>
-          <p className="mt-1 text-xs text-muted-foreground">
-            {invocation.toolCallId}
-          </p>
+          <p className="mt-2 text-sm leading-6 text-foreground">{delivery.summary}</p>
         </div>
-        {invocation.state === 'result' && result?.status === 'error' && result.error ? (
-          <div className="inline-flex items-center gap-1 rounded-full bg-destructive/10 px-2 py-0.5 text-[11px] font-medium text-destructive">
-            <AlertTriangle className="size-3.5" aria-hidden />
-            错误
-          </div>
+        {delivery.tone === 'success' ? (
+          <CheckCircle2 className="mt-0.5 size-4 shrink-0 text-emerald-500" />
+        ) : delivery.tone === 'error' ? (
+          <AlertTriangle className="mt-0.5 size-4 shrink-0 text-destructive" />
         ) : null}
       </div>
 
-      {invocation.state === 'calling' && (
-        <p className="mt-3 text-sm text-muted-foreground">正在等待工具返回结果...</p>
-      )}
-
-      {invocation.state === 'result' && result ? (
-        <div className="mt-3 space-y-3">
-          {result.status === 'error' ? (
-            <div className="rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive">
-              {result.error || '工具调用失败'}
-            </div>
-          ) : visualization ? (
-            <VisualizationBlock payload={result.result} />
-          ) : (
-            <div className="rounded-lg border border-border bg-background/80 p-3">
-              <div className="mb-2 text-xs font-medium uppercase tracking-wide text-muted-foreground">
-                返回内容
-              </div>
-              <pre className="max-h-72 overflow-auto whitespace-pre-wrap break-words text-xs leading-relaxed text-foreground">
-                {formatToolSummary(result.result)}
-              </pre>
-            </div>
-          )}
+      {delivery.highlights.length > 0 ? (
+        <div className="mt-3 flex flex-wrap gap-2">
+          {delivery.highlights.map((item) => (
+            <span
+              key={item}
+              className="rounded-full bg-background/80 px-2.5 py-1 text-[11px] text-muted-foreground"
+            >
+              {item}
+            </span>
+          ))}
         </div>
+      ) : null}
+
+      {delivery.nextStep ? (
+        <div className="mt-3 rounded-xl bg-background/80 px-3 py-2 text-xs leading-5 text-muted-foreground">
+          下一步建议：{delivery.nextStep}
+        </div>
+      ) : null}
+
+      {result?.status === 'success' && visualization ? (
+        <VisualizationBlock payload={result.result} />
+      ) : null}
+
+      {invocation.state === 'result' ? (
+        <details className="mt-3 rounded-xl border border-border/70 bg-background/70 p-3">
+          <summary className="cursor-pointer list-none text-xs font-medium text-muted-foreground">
+            查看原始结果
+          </summary>
+          <pre className="mt-2 max-h-72 overflow-auto whitespace-pre-wrap break-words text-xs leading-relaxed text-foreground">
+            {formatToolSummary(result?.result ?? delivery.rawResult)}
+          </pre>
+        </details>
       ) : null}
     </div>
   );
@@ -89,7 +115,6 @@ function ToolInvocationCard({
 
 interface ChatMessageProps {
   message: Message;
-  /** 浠呭姪鎵嬫秷鎭細搴曢儴鎿嶄綔 */
   onCopyAssistant?: () => void;
   onRegenerate?: () => void;
   regenerateDisabled?: boolean;
@@ -102,9 +127,7 @@ export default function ChatMessage({
   regenerateDisabled,
 }: ChatMessageProps) {
   const isUser = message.role === 'user';
-  const showAssistantActions =
-    !isUser && (onCopyAssistant || onRegenerate);
-
+  const showAssistantActions = !isUser && (onCopyAssistant || onRegenerate);
   const toolInvocations = message.toolInvocations ?? [];
   const showToolInvocations = !isUser && toolInvocations.length > 0;
 
@@ -112,40 +135,39 @@ export default function ChatMessage({
     <div
       className={cn(
         'mx-auto flex w-full max-w-3xl animate-ios-fade-in',
-        isUser ? 'flex-row-reverse justify-end' : 'flex-row'
+        isUser ? 'flex-row-reverse justify-end' : 'flex-row',
       )}
     >
       <div
         className={cn(
           'flex flex-1 flex-col gap-1.5',
-          isUser ? 'items-end' : 'items-start'
+          isUser ? 'items-end' : 'items-start',
         )}
       >
-        {isUser && message.content && (
-          <div
-            className={cn(
-              'max-w-[min(100%,32rem)] rounded-[20px] rounded-tr-[4px] bg-primary px-4 py-2.5 text-sm leading-relaxed text-primary-foreground shadow-sm'
-            )}
-          >
+        {isUser && message.content ? (
+          <div className="max-w-[min(100%,32rem)] rounded-[20px] rounded-tr-[4px] bg-primary px-4 py-2.5 text-sm leading-relaxed text-primary-foreground shadow-sm">
             <div className="max-w-none text-sm leading-relaxed">
               <MarkdownContent content={message.content} variant="user" />
             </div>
           </div>
-        )}
+        ) : null}
 
-        {!isUser && (message.content || showAssistantActions || showToolInvocations) && (
+        {!isUser && (message.content || showAssistantActions || showToolInvocations) ? (
           <div className="max-w-3xl py-1 text-[15px] leading-7 text-foreground">
-            {message.content && (
+            {message.content ? (
               <div className="max-w-none text-[15px] leading-relaxed text-foreground">
-                <MarkdownContent
-                  content={message.content}
-                  variant="assistant"
-                />
+                <MarkdownContent content={message.content} variant="assistant" />
               </div>
-            )}
+            ) : null}
 
-            {showToolInvocations && (
+            {showToolInvocations ? (
               <div className={cn('mt-3 space-y-2', message.content && 'pt-2')}>
+                <div className="rounded-2xl border border-border/70 bg-background/70 px-4 py-3">
+                  <p className="text-sm font-medium text-foreground">关键操作结果</p>
+                  <p className="mt-1 text-xs leading-5 text-muted-foreground">
+                    下面是本轮回复实际调用过的工具结果。先看摘要，需要时再展开原始数据。
+                  </p>
+                </div>
                 {toolInvocations.map((invocation) => (
                   <ToolInvocationCard
                     key={invocation.toolCallId}
@@ -153,16 +175,16 @@ export default function ChatMessage({
                   />
                 ))}
               </div>
-            )}
+            ) : null}
 
-            {showAssistantActions && (
+            {showAssistantActions ? (
               <div
                 className={cn(
                   'mt-2 flex flex-wrap items-center gap-1 pt-2',
                   message.content && 'border-t border-border/40',
                 )}
               >
-                {onCopyAssistant && (
+                {onCopyAssistant ? (
                   <button
                     type="button"
                     onClick={onCopyAssistant}
@@ -172,8 +194,8 @@ export default function ChatMessage({
                     <Copy className="size-3.5 shrink-0 opacity-80" aria-hidden />
                     复制
                   </button>
-                )}
-                {onRegenerate && (
+                ) : null}
+                {onRegenerate ? (
                   <button
                     type="button"
                     disabled={regenerateDisabled}
@@ -183,11 +205,11 @@ export default function ChatMessage({
                     <RotateCcw className="size-3.5 shrink-0 opacity-80" aria-hidden />
                     重新生成
                   </button>
-                )}
+                ) : null}
               </div>
-            )}
+            ) : null}
           </div>
-        )}
+        ) : null}
       </div>
     </div>
   );

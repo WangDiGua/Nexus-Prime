@@ -73,6 +73,10 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 }
 
+function isFiniteNumber(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value);
+}
+
 function unwrapVisualizationCandidate(value: unknown): unknown {
   if (!isRecord(value)) return null;
 
@@ -154,4 +158,124 @@ export function stringifyVisualizationJson(value: unknown): string {
 export function asVisualizationSourceRows(source: unknown): Record<string, unknown>[] {
   if (!Array.isArray(source)) return [];
   return source.filter(isRecord);
+}
+
+function inferFieldsFromRows(rows: Record<string, unknown>[]) {
+  const firstRow = rows[0];
+  if (!firstRow) {
+    return {
+      categoryKey: null as string | null,
+      numericKeys: [] as string[],
+    };
+  }
+
+  const keys = Object.keys(firstRow);
+  const numericKeys = keys.filter((key) =>
+    rows.every((row) => {
+      const value = row[key];
+      if (value == null) return true;
+      if (isFiniteNumber(value)) return true;
+      return typeof value === 'string' && value.trim() !== '' && !Number.isNaN(Number(value));
+    }),
+  );
+
+  const categoryKey =
+    keys.find((key) => !numericKeys.includes(key)) ?? keys[0] ?? null;
+
+  return {
+    categoryKey,
+    numericKeys: numericKeys.filter((key) => key !== categoryKey),
+  };
+}
+
+function normalizeNumericValue(value: unknown) {
+  if (isFiniteNumber(value)) return value;
+  if (typeof value === 'string' && value.trim() !== '' && !Number.isNaN(Number(value))) {
+    return Number(value);
+  }
+  return 0;
+}
+
+function hasRenderableSeries(option: Record<string, unknown>) {
+  return Array.isArray(option.series) && option.series.length > 0;
+}
+
+function hasCartesianAxes(option: Record<string, unknown>) {
+  return (
+    (isRecord(option.xAxis) || Array.isArray(option.xAxis)) &&
+    (isRecord(option.yAxis) || Array.isArray(option.yAxis))
+  );
+}
+
+export function buildFallbackEChartsOption(
+  payload: VisualizationPayload,
+): Record<string, unknown> | null {
+  const rows = asVisualizationSourceRows(payload.data.source);
+  if (rows.length === 0) return null;
+
+  const fields = payload.data.fields ?? [];
+  const categoryField =
+    fields.find((field) => field.type !== 'number')?.key ?? inferFieldsFromRows(rows).categoryKey;
+  const numericFields =
+    fields.filter((field) => field.type === 'number').map((field) => field.key) ??
+    [];
+
+  const inferred = inferFieldsFromRows(rows);
+  const xKey = categoryField ?? inferred.categoryKey;
+  const seriesKeys = (numericFields.length > 0 ? numericFields : inferred.numericKeys).filter(
+    (key) => key !== xKey,
+  );
+
+  if (!xKey || seriesKeys.length === 0) {
+    return null;
+  }
+
+  const normalizedRows = rows.map((row) => {
+    const next: Record<string, unknown> = { ...row, [xKey]: String(row[xKey] ?? '') };
+    for (const key of seriesKeys) {
+      next[key] = normalizeNumericValue(row[key]);
+    }
+    return next;
+  });
+
+  const kind = payload.chart.kind.toLowerCase();
+  const seriesType = kind.includes('line') ? 'line' : 'bar';
+
+  return {
+    animationDuration: 300,
+    tooltip: { trigger: 'axis' },
+    legend: { top: 0 },
+    grid: { left: 16, right: 16, top: 48, bottom: 16, containLabel: true },
+    xAxis: {
+      type: 'category',
+      data: normalizedRows.map((row) => String(row[xKey] ?? '')),
+      axisTick: { alignWithLabel: true },
+    },
+    yAxis: {
+      type: 'value',
+    },
+    series: seriesKeys.map((key) => ({
+      name: fields.find((field) => field.key === key)?.label ?? key,
+      type: seriesType,
+      data: normalizedRows.map((row) => normalizeNumericValue(row[key])),
+      ...(seriesType === 'line'
+        ? { smooth: true, emphasis: { focus: 'series' } }
+        : { emphasis: { focus: 'series' } }),
+    })),
+  };
+}
+
+export function resolveRenderableEChartsOption(
+  payload: VisualizationPayload,
+): Record<string, unknown> | null {
+  const rawOption = payload.chart.spec.option;
+  const kind = payload.chart.kind.toLowerCase();
+
+  if (kind.includes('bar') || kind.includes('line')) {
+    if (!hasRenderableSeries(rawOption) || !hasCartesianAxes(rawOption)) {
+      return buildFallbackEChartsOption(payload);
+    }
+  }
+
+  return rawOption;
 }

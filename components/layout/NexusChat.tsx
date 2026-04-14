@@ -1,6 +1,14 @@
 ﻿'use client';
 
-import React, { useRef, useEffect, useState, useCallback, useMemo } from 'react';
+import dynamic from 'next/dynamic';
+import React, {
+  useRef,
+  useEffect,
+  useState,
+  useCallback,
+  useMemo,
+  useDeferredValue,
+} from 'react';
 import {
   ArrowUp,
   LayoutGrid,
@@ -22,9 +30,14 @@ import {
 import ChatMessage from '@/components/chat/ChatMessage';
 import { ModelSelect } from '@/components/ui/model-select';
 import {
+  getWorkModeSummary,
+  recommendSkills,
+} from '@/lib/agent-workbench';
+import {
   buildChatModelOptions,
   normalizeChatModelId,
 } from '@/lib/chat-model-options';
+import { registryClient } from '@/lib/registry-client';
 import { cn } from '@/lib/utils';
 import { useAuth } from '@/components/auth/auth-provider';
 import { toast } from '@/lib/toast';
@@ -37,10 +50,18 @@ import type {
   ToolInvocationView,
   ToolResult,
 } from '@/types/chat';
-import {
-  SkillStoreSheet,
-  type ChatSelectedSkill,
-} from '@/components/chat/skill-store-sheet';
+import type { ChatSelectedSkill } from '@/components/chat/skill-store-sheet';
+import type { Skill } from '@/types/registry';
+
+const SkillStoreSheet = dynamic(
+  () =>
+    import('@/components/chat/skill-store-sheet').then(
+      (mod) => mod.SkillStoreSheet,
+    ),
+  {
+    ssr: false,
+  },
+);
 
 export interface NexusChatProps {
   sidebarCollapsed?: boolean;
@@ -146,17 +167,82 @@ function localMessagesToStored(
   }));
 }
 
-function messagesCacheFingerprint(local: Message[]): string {
-  return JSON.stringify(
-    local.map((m) => ({
-      id: m.id,
-      role: m.role,
-      content: m.content,
-      thinkingLog: m.thinkingLog,
-      thinkingStepDurationsMs: m.thinkingStepDurationsMs,
-      toolInvocations: m.toolInvocations,
-    })),
+function primitiveArrayEqual(
+  left?: Array<string | number>,
+  right?: Array<string | number>,
+) {
+  if (left === right) return true;
+  if (!left || !right) return !left && !right;
+  if (left.length !== right.length) return false;
+  for (let i = 0; i < left.length; i += 1) {
+    if (left[i] !== right[i]) return false;
+  }
+  return true;
+}
+
+function toolResultEqual(left?: ToolResult, right?: ToolResult) {
+  if (left === right) return true;
+  if (!left || !right) return !left && !right;
+  return (
+    left.status === right.status &&
+    left.error === right.error &&
+    JSON.stringify(left.result ?? null) === JSON.stringify(right.result ?? null)
   );
+}
+
+function toolInvocationsEqual(
+  left?: ToolInvocationView[],
+  right?: ToolInvocationView[],
+) {
+  if (left === right) return true;
+  if (!left || !right) return !left && !right;
+  if (left.length !== right.length) return false;
+
+  for (let i = 0; i < left.length; i += 1) {
+    const leftItem = left[i];
+    const rightItem = right[i];
+    if (!leftItem || !rightItem) return false;
+    if (
+      leftItem.toolCallId !== rightItem.toolCallId ||
+      leftItem.toolName !== rightItem.toolName ||
+      leftItem.state !== rightItem.state ||
+      JSON.stringify(leftItem.args ?? null) !== JSON.stringify(rightItem.args ?? null) ||
+      !toolResultEqual(leftItem.result, rightItem.result)
+    ) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+function messagesEqual(left: Message[], right: Message[]) {
+  if (left === right) return true;
+  if (left.length !== right.length) return false;
+
+  for (let i = 0; i < left.length; i += 1) {
+    const leftMessage = left[i];
+    const rightMessage = right[i];
+    if (!leftMessage || !rightMessage) return false;
+    if (
+      leftMessage.id !== rightMessage.id ||
+      leftMessage.role !== rightMessage.role ||
+      leftMessage.content !== rightMessage.content ||
+      !primitiveArrayEqual(leftMessage.thinkingLog, rightMessage.thinkingLog) ||
+      !primitiveArrayEqual(
+        leftMessage.thinkingStepDurationsMs,
+        rightMessage.thinkingStepDurationsMs,
+      ) ||
+      !toolInvocationsEqual(
+        leftMessage.toolInvocations,
+        rightMessage.toolInvocations,
+      )
+    ) {
+      return false;
+    }
+  }
+
+  return true;
 }
 
 function ThinkingTrace({
@@ -391,7 +477,7 @@ function ThinkingTrace({
                 )}
               >
                 <p className="mb-1.5 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
-                  褰撳墠鎬濊€?
+                  当前思考
                 </p>
                 <div
                   className={cn(
@@ -475,6 +561,406 @@ function ChatShellSkeleton() {
   );
 }
 
+const TypingIndicator = React.memo(function TypingIndicator({
+  visible,
+}: {
+  visible: boolean;
+}) {
+  if (!visible) return null;
+  return (
+    <div className="mx-auto flex w-full max-w-3xl animate-ios-fade-in">
+      <div className="flex w-full flex-1 items-center gap-2 py-2 text-sm text-muted-foreground">
+        <div className="flex gap-1">
+          <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-primary/40 [animation-delay:-0.3s]" />
+          <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-primary/40 [animation-delay:-0.15s]" />
+          <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-primary/40" />
+        </div>
+        Nexus 正在思考…
+      </div>
+    </div>
+  );
+});
+
+const ChatHeader = React.memo(function ChatHeader({
+  sidebarCollapsed,
+  onOpenSidebar,
+  resolvedModelValue,
+  chatModelOptions,
+  handleModelChange,
+  canChat,
+  isLoading,
+  handleStop,
+}: {
+  sidebarCollapsed: boolean;
+  onOpenSidebar?: () => void;
+  resolvedModelValue: string;
+  chatModelOptions: Array<{ value: string; label: string }>;
+  handleModelChange: (value: string) => void | Promise<void>;
+  canChat: boolean;
+  isLoading: boolean;
+  handleStop: () => void;
+}) {
+  return (
+    <header className="z-20 flex min-h-14 shrink-0 items-center gap-2 px-3 sm:gap-3 sm:px-4">
+      <div className="flex min-w-0 flex-1 items-center gap-2">
+        {sidebarCollapsed && (
+          <button
+            type="button"
+            onClick={onOpenSidebar}
+            className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg text-muted-foreground transition-colors hover:bg-black/[0.06] dark:hover:bg-white/10"
+            aria-label="打开侧边栏"
+          >
+            <PanelLeft size={20} />
+          </button>
+        )}
+        <div className="relative min-w-0 w-auto max-w-[min(100vw-8rem,280px)] shrink-0 sm:max-w-[min(100vw-10rem,280px)]">
+          <ModelSelect
+            id="chat-header-model"
+            value={resolvedModelValue}
+            onChange={(v) => void handleModelChange(v)}
+            options={chatModelOptions}
+            className="w-full"
+            disabled={!canChat}
+          />
+        </div>
+        {isLoading && (
+          <button
+            type="button"
+            onClick={handleStop}
+            className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg transition-colors hover:bg-red-500/10 dark:hover:bg-red-500/20"
+            aria-label="停止生成"
+          >
+            <Square size={18} className="text-red-500" />
+          </button>
+        )}
+      </div>
+    </header>
+  );
+});
+
+const ChatComposer = React.memo(function ChatComposer({
+  handleSubmit,
+  canChat,
+  isLoading,
+  thinkingModeEnabled,
+  setThinkingModeEnabled,
+  selectedSkill,
+  setSkillSheetOpen,
+  setSelectedSkill,
+  input,
+  setInput,
+  isReady,
+}: {
+  handleSubmit: (e: React.FormEvent) => Promise<void> | void;
+  canChat: boolean;
+  isLoading: boolean;
+  thinkingModeEnabled: boolean;
+  setThinkingModeEnabled: React.Dispatch<React.SetStateAction<boolean>>;
+  selectedSkill: ChatSelectedSkill | null;
+  setSkillSheetOpen: React.Dispatch<React.SetStateAction<boolean>>;
+  setSelectedSkill: React.Dispatch<React.SetStateAction<ChatSelectedSkill | null>>;
+  input: string;
+  setInput: React.Dispatch<React.SetStateAction<string>>;
+  isReady: boolean;
+}) {
+  return (
+    <form onSubmit={handleSubmit} className="relative mx-auto w-full max-w-3xl">
+      <div
+        className={cn(
+          'flex flex-wrap items-end gap-2 rounded-[1.75rem] border border-gpt-border bg-gpt-composer px-2 py-2 pl-2.5 shadow-sm transition-shadow focus-within:shadow-md focus-within:ring-2 focus-within:ring-primary/20',
+          'sm:flex-nowrap sm:gap-2.5',
+        )}
+      >
+        <button
+          type="button"
+          onClick={() => setThinkingModeEnabled((v) => !v)}
+          disabled={!canChat || isLoading}
+          aria-pressed={thinkingModeEnabled}
+          title={
+            thinkingModeEnabled
+              ? '思考模式已开启：会展示推理过程，响应更慢'
+              : '点击开启思考模式（展示推理过程，响应更慢）'
+          }
+          className={cn(
+            'flex h-10 shrink-0 items-center gap-1 rounded-full px-2 text-xs font-medium transition-colors sm:px-2.5',
+            !canChat || isLoading
+              ? 'cursor-not-allowed opacity-40'
+              : thinkingModeEnabled
+                ? 'bg-primary/15 text-primary hover:bg-primary/20'
+                : 'text-muted-foreground hover:bg-muted/70',
+          )}
+        >
+          <Sparkles className="size-4 shrink-0" aria-hidden />
+          <span className="hidden sm:inline">思考</span>
+        </button>
+        <button
+          type="button"
+          onClick={() => setSkillSheetOpen(true)}
+          disabled={!canChat || isLoading}
+          aria-pressed={Boolean(selectedSkill)}
+          title={
+            selectedSkill
+              ? '当前技能：' + selectedSkill.name + '（点击更换）'
+              : '技能商店：选择后作为对话工具入口'
+          }
+          className={cn(
+            'flex h-10 shrink-0 items-center gap-1 rounded-full px-2 text-xs font-medium transition-colors sm:px-2.5',
+            !canChat || isLoading
+              ? 'cursor-not-allowed opacity-40'
+              : selectedSkill
+                ? 'bg-primary/15 text-primary hover:bg-primary/20'
+                : 'text-muted-foreground hover:bg-muted/70',
+          )}
+        >
+          <LayoutGrid className="size-4 shrink-0" aria-hidden />
+          <span className="hidden sm:inline">技能</span>
+        </button>
+        {selectedSkill ? (
+          <div className="flex min-h-9 w-full min-w-0 basis-full items-center gap-0.5 rounded-full bg-muted/80 py-1 pl-2 pr-1 text-xs text-foreground sm:w-auto sm:max-w-[min(40%,220px)] sm:basis-auto">
+            <span className="min-w-0 flex-1 truncate font-medium sm:flex-initial" title={selectedSkill.name}>
+              {selectedSkill.name}
+            </span>
+            <button
+              type="button"
+              onClick={() => setSelectedSkill(null)}
+              disabled={!canChat || isLoading}
+              className="flex size-7 shrink-0 items-center justify-center rounded-full text-muted-foreground transition-colors hover:bg-background/80 hover:text-foreground"
+              aria-label="清除所选技能"
+            >
+              <X className="size-3.5" />
+            </button>
+          </div>
+        ) : null}
+        <div className="flex min-h-[44px] min-w-0 flex-1 basis-full items-end gap-2 sm:min-h-0 sm:basis-0 sm:min-w-[8rem]">
+          <textarea
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                void handleSubmit(e as unknown as React.FormEvent);
+              }
+            }}
+            placeholder={
+              !isReady ? '' : canChat ? '有问题，尽管问' : '登录后开始对话'
+            }
+            className="min-h-[44px] max-h-[200px] min-w-0 flex-1 resize-none border-none bg-transparent py-2.5 pl-0 pr-1 text-[15px] leading-normal text-foreground placeholder:text-muted-foreground focus:outline-none sm:min-h-[40px] sm:py-2 sm:leading-6"
+            rows={1}
+            disabled={!canChat || isLoading}
+          />
+          <button
+            type="submit"
+            disabled={!canChat || !input.trim() || isLoading}
+            className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-foreground text-background transition-all hover:opacity-90 disabled:opacity-25 dark:bg-white dark:text-black"
+            aria-label="发送"
+          >
+            <ArrowUp size={20} strokeWidth={2.5} />
+          </button>
+        </div>
+      </div>
+      <div className="mt-2 flex flex-wrap items-center justify-between gap-2 px-2 text-[11px] text-muted-foreground">
+        <span>
+          {selectedSkill
+            ? '当前会话会优先围绕“' + selectedSkill.name + '”调用更合适的工具。'
+            : '先直接描述任务，系统会根据上下文决定是否需要调用工具。'}
+        </span>
+        <span>Enter 发送，Shift + Enter 换行</span>
+      </div>
+    </form>
+  );
+});
+
+function WorkModeBanner({
+  title,
+  description,
+  chips,
+}: {
+  title: string;
+  description: string;
+  chips: string[];
+}) {
+  return (
+    <div className="px-3 pt-3 sm:px-4">
+      <div className="mx-auto w-full max-w-3xl rounded-2xl border border-border/70 bg-background/70 px-4 py-3">
+        <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+          <div className="min-w-0">
+            <p className="text-sm font-medium text-foreground">{title}</p>
+            <p className="mt-1 text-xs leading-5 text-muted-foreground">
+              {description}
+            </p>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            {chips.map((chip) => (
+              <span
+                key={chip}
+                className="rounded-full bg-primary/10 px-2.5 py-1 text-[11px] font-medium text-primary"
+              >
+                {chip}
+              </span>
+            ))}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function SkillSuggestions({
+  skills,
+  onSelect,
+}: {
+  skills: Skill[];
+  onSelect: (skill: ChatSelectedSkill) => void;
+}) {
+  if (skills.length === 0) return null;
+
+  return (
+    <div className="mx-auto flex w-full max-w-3xl flex-col gap-2">
+      <div className="rounded-2xl border border-border/70 bg-background/70 px-4 py-3">
+        <p className="text-sm font-medium text-foreground">建议使用这些技能</p>
+        <p className="mt-1 text-xs leading-5 text-muted-foreground">
+          如果你的目标很明确，选一个技能后通常能更快进入任务执行状态。
+        </p>
+        <div className="mt-3 flex flex-wrap gap-2">
+          {skills.map((skill) => (
+            <button
+              key={skill.id}
+              type="button"
+              onClick={() =>
+                onSelect({
+                  id: skill.id,
+                  name: skill.name,
+                  icon: skill.icon,
+                })
+              }
+              className="rounded-full border border-border bg-background px-3 py-1.5 text-xs font-medium text-foreground transition-colors hover:bg-muted"
+            >
+              {skill.name}
+            </button>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+const ChatMessageList = React.memo(function ChatMessageList({
+  localMessages,
+  regenerateDisabled,
+  streamingAssistantId,
+  thinkingModeEnabled,
+  handleCopyAssistant,
+  handleRegenerateAssistant,
+  scrollRef,
+  showTypingIndicator,
+}: {
+  localMessages: Message[];
+  regenerateDisabled: boolean;
+  streamingAssistantId: string | null;
+  thinkingModeEnabled: boolean;
+  handleCopyAssistant: (text: string) => Promise<void>;
+  handleRegenerateAssistant: (assistantMessageId: string) => Promise<void>;
+  scrollRef: React.RefObject<HTMLDivElement | null>;
+  showTypingIndicator: boolean;
+}) {
+  return (
+    <div
+      ref={scrollRef}
+      className="min-h-0 flex-1 space-y-6 overflow-y-auto scroll-smooth px-3 py-4 sm:px-4 scrollbar-none"
+    >
+      {localMessages.map((msg) => {
+        const isStreaming =
+          msg.role === 'assistant' &&
+          regenerateDisabled &&
+          msg.id === streamingAssistantId;
+
+        return (
+          <ChatMessageRow
+            key={msg.id}
+            message={msg}
+            isStreaming={isStreaming}
+            showThinkingTrace={
+              msg.role === 'assistant' &&
+              ((msg.thinkingLog && msg.thinkingLog.length > 0) ||
+                (thinkingModeEnabled && isStreaming))
+            }
+            showDots={
+              !thinkingModeEnabled &&
+              isStreaming &&
+              !msg.content.trim()
+            }
+            showAssistantActions={
+              msg.role === 'assistant' && !isStreaming
+            }
+            regenerateDisabled={regenerateDisabled}
+            handleCopyAssistant={handleCopyAssistant}
+            handleRegenerateAssistant={handleRegenerateAssistant}
+          />
+        );
+      })}
+      <TypingIndicator visible={showTypingIndicator} />
+    </div>
+  );
+});
+
+const ChatMessageRow = React.memo(function ChatMessageRow({
+  message,
+  isStreaming,
+  showThinkingTrace,
+  showDots,
+  showAssistantActions,
+  regenerateDisabled,
+  handleCopyAssistant,
+  handleRegenerateAssistant,
+}: {
+  message: Message;
+  isStreaming: boolean;
+  showThinkingTrace: boolean;
+  showDots: boolean;
+  showAssistantActions: boolean;
+  regenerateDisabled: boolean;
+  handleCopyAssistant: (text: string) => Promise<void>;
+  handleRegenerateAssistant: (assistantMessageId: string) => Promise<void>;
+}) {
+  return (
+    <div className="space-y-2">
+      {showThinkingTrace && (
+          <ThinkingTrace
+            logs={message.thinkingLog ?? []}
+            stepDurationsMs={message.thinkingStepDurationsMs}
+            isLoading={isStreaming}
+          />
+        )}
+      {showDots && <AssistantStreamDots />}
+      <ChatMessage
+        message={message as any}
+        onCopyAssistant={
+          showAssistantActions
+            ? () => void handleCopyAssistant(message.content)
+            : undefined
+        }
+        onRegenerate={
+          showAssistantActions
+            ? () => void handleRegenerateAssistant(message.id)
+            : undefined
+        }
+        regenerateDisabled={regenerateDisabled}
+      />
+    </div>
+  );
+}, (prev, next) => {
+  return (
+    prev.message === next.message &&
+    prev.isStreaming === next.isStreaming &&
+    prev.showThinkingTrace === next.showThinkingTrace &&
+    prev.showDots === next.showDots &&
+    prev.showAssistantActions === next.showAssistantActions &&
+    prev.regenerateDisabled === next.regenerateDisabled &&
+    prev.handleCopyAssistant === next.handleCopyAssistant &&
+    prev.handleRegenerateAssistant === next.handleRegenerateAssistant
+  );
+});
+
 export default function NexusChat({
   sidebarCollapsed = false,
   onOpenSidebar,
@@ -533,10 +1019,10 @@ export default function NexusChat({
       });
       if (!response.ok) {
         const err = await response.json().catch(() => ({} as { error?: string }));
-        toast.error(err.error || '榛樿妯″瀷鍚屾澶辫触');
+        toast.error(err.error || '默认模型同步失败');
       }
     } catch {
-      toast.error('榛樿妯″瀷鍚屾澶辫触');
+      toast.error('默认模型同步失败');
     }
   };
 
@@ -584,6 +1070,7 @@ export default function NexusChat({
     null,
   );
   const [skillSheetOpen, setSkillSheetOpen] = useState(false);
+  const [availableSkills, setAvailableSkills] = useState<Skill[]>([]);
   useEffect(() => {
     try {
       const raw = window.localStorage.getItem('nexus-prime:chat-entry-skill');
@@ -611,35 +1098,68 @@ export default function NexusChat({
     }
   }, [selectedSkill]);
 
+  useEffect(() => {
+    let cancelled = false;
+
+    const loadSkills = async () => {
+      try {
+        const capabilities = await registryClient.fetchCapabilities();
+        if (!cancelled) {
+          setAvailableSkills(capabilities.skills);
+        }
+      } catch {
+        if (!cancelled) {
+          setAvailableSkills([]);
+        }
+      }
+    };
+
+    void loadSkills();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   const prevActiveConversationId = useRef<string | null>(activeConversationId);
   /** 浠呯敤浜庢仮澶嶆媺鍙栵細棣栧抚涓?null锛屼究浜庡湪銆屽埛鏂?/ 棣栨杩涘叆甯?id銆嶆椂涓庡綋鍓?id 姣旇緝涓哄凡鍙樺寲锛屼粠鑰屽繀瀹氳姹傛湇鍔＄ */
   const restorePrevConversationIdRef = useRef<string | null>(null);
   const localMessagesRef = useRef<Message[]>([]);
   localMessagesRef.current = localMessages;
+  const deferredMessages = useDeferredValue(localMessages);
+  const recommendedSkills = useMemo(
+    () => recommendSkills(availableSkills, input),
+    [availableSkills, input],
+  );
+  const workModeSummary = useMemo(
+    () =>
+      getWorkModeSummary({
+        canChat,
+        thinkingModeEnabled,
+        selectedSkill,
+      }),
+    [canChat, selectedSkill, thinkingModeEnabled],
+  );
 
   /** 鏈嶅姟绔?鎸佷箙鍖?store 鏇存柊鏃跺悓姝ュ埌鏈湴锛涗笌鏈湴鎸囩汗涓€鑷村垯璺宠繃锛岄伩鍏嶄笌銆屾湰鍦扳啋store 闃叉姈銆嶄簰鐩告墦鏋?*/
   useEffect(() => {
     if (storedMessages.length === 0) return;
     const fromStored = storedMessages.map(mapStoredToLocalMessage);
-    if (
-      messagesCacheFingerprint(fromStored) ===
-      messagesCacheFingerprint(localMessagesRef.current)
-    ) {
+    if (messagesEqual(fromStored, localMessagesRef.current)) {
       return;
     }
     setLocalMessages(fromStored);
   }, [storedMessages]);
 
-  const lastPersistedFingerprintRef = useRef<string>('');
+  const lastPersistedMessagesRef = useRef<Message[]>([]);
 
   /** 鏈湴瀵硅瘽 鈫?zustand persist锛坙ocalStorage锛夛紝瀹炵幇娴忚鍣ㄤ晶缂撳瓨锛屼緵鍒锋柊鍚庡厛灞曠ず鍐嶄笌 DB 瀵归綈 */
   useEffect(() => {
     if (!activeConversationId || !persistHydrated) return;
 
     const t = window.setTimeout(() => {
-      const fp = messagesCacheFingerprint(localMessages);
-      if (fp === lastPersistedFingerprintRef.current) return;
-      lastPersistedFingerprintRef.current = fp;
+      if (messagesEqual(localMessages, lastPersistedMessagesRef.current)) return;
+      lastPersistedMessagesRef.current = localMessages;
       setStoredMessages(
         localMessagesToStored(activeConversationId, localMessages),
       );
@@ -848,6 +1368,53 @@ export default function NexusChat({
       let thinkingStepStartedAt = Date.now();
       /** 鏄惁澶勪簬鍚屼竴杞€屾ā鍨嬫€濊€冦€嶆祦寮忕墖娈典腑锛坮easoning_delta锛?*/
       let reasoningDeltaOpen = false;
+      let pendingUiFlush = false;
+      let animationFrameId: number | null = null;
+
+      const syncAssistantMessage = () => {
+        pendingUiFlush = false;
+        setLocalMessages((prev) => {
+          const nextAssistantMessage: Message = {
+            id: assistantMessageId,
+            role: 'assistant',
+            content: currentContent,
+            toolInvocations: [...currentToolInvocations],
+            thinkingLog: [...currentThinkingLog],
+            thinkingStepDurationsMs: [...currentThinkingDurationsMs],
+          };
+          const existingIndex = prev.findIndex((m) => m.id === assistantMessageId);
+          if (existingIndex === -1) {
+            return [...prev, nextAssistantMessage];
+          }
+          const next = [...prev];
+          next[existingIndex] = {
+            ...next[existingIndex],
+            ...nextAssistantMessage,
+          };
+          return next;
+        });
+      };
+
+      const scheduleAssistantSync = () => {
+        if (pendingUiFlush) return;
+        pendingUiFlush = true;
+        if (typeof window === 'undefined') {
+          syncAssistantMessage();
+          return;
+        }
+        animationFrameId = window.requestAnimationFrame(() => {
+          animationFrameId = null;
+          syncAssistantMessage();
+        });
+      };
+
+      const flushAssistantSync = () => {
+        if (animationFrameId !== null && typeof window !== 'undefined') {
+          window.cancelAnimationFrame(animationFrameId);
+          animationFrameId = null;
+        }
+        syncAssistantMessage();
+      };
 
       const finalizeLastThinkingStep = () => {
         const now = Date.now();
@@ -921,30 +1488,7 @@ export default function NexusChat({
                           (currentThinkingLog[lastIdx] || '') + event.content;
                       }
                     }
-                    setLocalMessages(prev => {
-                      const existing = prev.find(m => m.id === assistantMessageId);
-                      if (existing) {
-                        return prev.map(m =>
-                          m.id === assistantMessageId
-                            ? {
-                                ...m,
-                                content: currentContent,
-                                toolInvocations: currentToolInvocations,
-                                thinkingLog: [...currentThinkingLog],
-                                thinkingStepDurationsMs: [...currentThinkingDurationsMs],
-                              }
-                            : m
-                        );
-                      }
-                      return [...prev, {
-                        id: assistantMessageId,
-                        role: 'assistant',
-                        content: currentContent,
-                        toolInvocations: currentToolInvocations,
-                        thinkingLog: [...currentThinkingLog],
-                        thinkingStepDurationsMs: [...currentThinkingDurationsMs],
-                      }];
-                    });
+                    scheduleAssistantSync();
                     break;
                   }
 
@@ -958,30 +1502,7 @@ export default function NexusChat({
                     }
                     currentThinkingLog.push(event.content);
                     thinkingStepStartedAt = now;
-                    setLocalMessages(prev => {
-                      const existing = prev.find(m => m.id === assistantMessageId);
-                      if (existing) {
-                        return prev.map(m =>
-                          m.id === assistantMessageId
-                            ? {
-                                ...m,
-                                content: currentContent,
-                                toolInvocations: currentToolInvocations,
-                                thinkingLog: [...currentThinkingLog],
-                                thinkingStepDurationsMs: [...currentThinkingDurationsMs],
-                              }
-                            : m
-                        );
-                      }
-                      return [...prev, {
-                        id: assistantMessageId,
-                        role: 'assistant',
-                        content: currentContent,
-                        toolInvocations: currentToolInvocations,
-                        thinkingLog: [...currentThinkingLog],
-                        thinkingStepDurationsMs: [...currentThinkingDurationsMs],
-                      }];
-                    });
+                    scheduleAssistantSync();
                     break;
                   }
 
@@ -996,30 +1517,7 @@ export default function NexusChat({
                       thinkingStepStartedAt = now;
                     }
                     currentContent += event.content;
-                    setLocalMessages(prev => {
-                      const existing = prev.find(m => m.id === assistantMessageId);
-                      if (existing) {
-                        return prev.map(m =>
-                          m.id === assistantMessageId
-                            ? {
-                                ...m,
-                                content: currentContent,
-                                toolInvocations: currentToolInvocations,
-                                thinkingLog: [...currentThinkingLog],
-                                thinkingStepDurationsMs: [...currentThinkingDurationsMs],
-                              }
-                            : m
-                        );
-                      }
-                      return [...prev, {
-                        id: assistantMessageId,
-                        role: 'assistant',
-                        content: currentContent,
-                        toolInvocations: currentToolInvocations,
-                        thinkingLog: [...currentThinkingLog],
-                        thinkingStepDurationsMs: [...currentThinkingDurationsMs],
-                      }];
-                    });
+                    scheduleAssistantSync();
                     break;
                   }
 
@@ -1051,30 +1549,7 @@ export default function NexusChat({
                       payload: toolCall.args
                     });
 
-                    setLocalMessages(prev => {
-                      const existing = prev.find(m => m.id === assistantMessageId);
-                      if (existing) {
-                        return prev.map(m =>
-                          m.id === assistantMessageId
-                            ? {
-                                ...m,
-                                content: currentContent,
-                                toolInvocations: [...currentToolInvocations],
-                                thinkingLog: [...currentThinkingLog],
-                                thinkingStepDurationsMs: [...currentThinkingDurationsMs],
-                              }
-                            : m
-                        );
-                      }
-                      return [...prev, {
-                        id: assistantMessageId,
-                        role: 'assistant',
-                        content: currentContent,
-                        toolInvocations: [...currentToolInvocations],
-                        thinkingLog: [...currentThinkingLog],
-                        thinkingStepDurationsMs: [...currentThinkingDurationsMs],
-                      }];
-                    });
+                    scheduleAssistantSync();
                     break;
                   }
 
@@ -1102,16 +1577,7 @@ export default function NexusChat({
                         response: result.result,
                       });
 
-                      setLocalMessages(prev => prev.map(m =>
-                        m.id === assistantMessageId
-                          ? {
-                              ...m,
-                              toolInvocations: [...currentToolInvocations],
-                              thinkingLog: [...currentThinkingLog],
-                              thinkingStepDurationsMs: [...currentThinkingDurationsMs],
-                            }
-                          : m
-                      ));
+                      scheduleAssistantSync();
                     }
                     break;
                   }
@@ -1164,33 +1630,7 @@ export default function NexusChat({
                     (currentThinkingLog[lastIdx] || '') + event.content;
                 }
               }
-              setLocalMessages((prev) => {
-                const existing = prev.find((m) => m.id === assistantMessageId);
-                if (existing) {
-                  return prev.map((m) =>
-                    m.id === assistantMessageId
-                      ? {
-                          ...m,
-                          content: currentContent,
-                          toolInvocations: currentToolInvocations,
-                          thinkingLog: [...currentThinkingLog],
-                          thinkingStepDurationsMs: [...currentThinkingDurationsMs],
-                        }
-                      : m
-                  );
-                }
-                return [
-                  ...prev,
-                  {
-                    id: assistantMessageId,
-                    role: 'assistant' as const,
-                    content: currentContent,
-                    toolInvocations: currentToolInvocations,
-                    thinkingLog: [...currentThinkingLog],
-                    thinkingStepDurationsMs: [...currentThinkingDurationsMs],
-                  },
-                ];
-              });
+              scheduleAssistantSync();
             } else if (event.type === 'content' && event.content) {
               if (reasoningDeltaOpen) {
                 reasoningDeltaOpen = false;
@@ -1202,33 +1642,7 @@ export default function NexusChat({
                 thinkingStepStartedAt = now;
               }
               currentContent += event.content;
-              setLocalMessages((prev) => {
-                const existing = prev.find((m) => m.id === assistantMessageId);
-                if (existing) {
-                  return prev.map((m) =>
-                    m.id === assistantMessageId
-                      ? {
-                          ...m,
-                          content: currentContent,
-                          toolInvocations: currentToolInvocations,
-                          thinkingLog: [...currentThinkingLog],
-                          thinkingStepDurationsMs: [...currentThinkingDurationsMs],
-                        }
-                      : m
-                  );
-                }
-                return [
-                  ...prev,
-                  {
-                    id: assistantMessageId,
-                    role: 'assistant' as const,
-                    content: currentContent,
-                    toolInvocations: currentToolInvocations,
-                    thinkingLog: [...currentThinkingLog],
-                    thinkingStepDurationsMs: [...currentThinkingDurationsMs],
-                  },
-                ];
-              });
+              scheduleAssistantSync();
             }
           } catch {
             // trailing fragment incomplete
@@ -1249,6 +1663,7 @@ export default function NexusChat({
         }]);
       } finally {
         finalizeLastThinkingStep();
+        flushAssistantSync();
         if (
           currentConversationId &&
           (currentContent.trim().length > 0 ||
@@ -1283,6 +1698,9 @@ export default function NexusChat({
         setIsLoading(false);
         setStreamingAssistantId(null);
         setAbortController(null);
+        if (animationFrameId !== null && typeof window !== 'undefined') {
+          window.cancelAnimationFrame(animationFrameId);
+        }
         if (currentConversationId) {
           bumpConversationList();
         }
@@ -1301,7 +1719,7 @@ export default function NexusChat({
       await navigator.clipboard.writeText(text);
       toast.success('已复制');
     } catch {
-      toast.error('澶嶅埗澶辫触');
+      toast.error('复制失败');
     }
   }, []);
 
@@ -1461,157 +1879,23 @@ export default function NexusChat({
     !persistHydrated ||
     (Boolean(activeConversationId) && messagesRestoring);
 
-  const typingIndicator = showTypingIndicator ? (
-    <div className="mx-auto flex w-full max-w-3xl animate-ios-fade-in">
-      <div className="flex w-full flex-1 items-center gap-2 py-2 text-sm text-muted-foreground">
-        <div className="flex gap-1">
-          <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-primary/40 [animation-delay:-0.3s]" />
-          <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-primary/40 [animation-delay:-0.15s]" />
-          <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-primary/40" />
-        </div>
-        Nexus 正在思考…
-      </div>
-    </div>
-  ) : null;
-
-  const composerForm = (
-    <form onSubmit={handleSubmit} className="relative mx-auto w-full max-w-3xl">
-      <div
-        className={cn(
-          'flex flex-wrap items-end gap-2 rounded-[1.75rem] border border-gpt-border bg-gpt-composer px-2 py-2 pl-2.5 shadow-sm transition-shadow focus-within:shadow-md focus-within:ring-2 focus-within:ring-primary/20',
-          'sm:flex-nowrap sm:gap-2.5'
-        )}
-      >
-        <button
-          type="button"
-          onClick={() => setThinkingModeEnabled((v) => !v)}
-          disabled={!canChat || isLoading}
-          aria-pressed={thinkingModeEnabled}
-          title={
-            thinkingModeEnabled
-              ? '思考模式已开启：会展示推理过程，响应更慢'
-              : '点击开启思考模式（展示推理过程，响应更慢）'
-          }
-          className={cn(
-            'flex h-10 shrink-0 items-center gap-1 rounded-full px-2 text-xs font-medium transition-colors sm:px-2.5',
-            !canChat || isLoading
-              ? 'cursor-not-allowed opacity-40'
-              : thinkingModeEnabled
-                ? 'bg-primary/15 text-primary hover:bg-primary/20'
-                : 'text-muted-foreground hover:bg-muted/70'
-          )}
-        >
-          <Sparkles className="size-4 shrink-0" aria-hidden />
-          <span className="hidden sm:inline">思考</span>
-        </button>
-        <button
-          type="button"
-          onClick={() => setSkillSheetOpen(true)}
-          disabled={!canChat || isLoading}
-          aria-pressed={Boolean(selectedSkill)}
-          title={
-            selectedSkill
-              ? '当前技能：' + selectedSkill.name + '（点击更换）'
-              : '技能商店：选择后作为对话工具入口'
-          }
-          className={cn(
-            'flex h-10 shrink-0 items-center gap-1 rounded-full px-2 text-xs font-medium transition-colors sm:px-2.5',
-            !canChat || isLoading
-              ? 'cursor-not-allowed opacity-40'
-              : selectedSkill
-                ? 'bg-primary/15 text-primary hover:bg-primary/20'
-                : 'text-muted-foreground hover:bg-muted/70'
-          )}
-        >
-          <LayoutGrid className="size-4 shrink-0" aria-hidden />
-          <span className="hidden sm:inline">技能</span>
-        </button>
-        {selectedSkill ? (
-          <div className="flex min-h-9 w-full min-w-0 basis-full items-center gap-0.5 rounded-full bg-muted/80 py-1 pl-2 pr-1 text-xs text-foreground sm:w-auto sm:max-w-[min(40%,220px)] sm:basis-auto">
-            <span className="min-w-0 flex-1 truncate font-medium sm:flex-initial" title={selectedSkill.name}>
-              {selectedSkill.name}
-            </span>
-            <button
-              type="button"
-              onClick={() => setSelectedSkill(null)}
-              disabled={!canChat || isLoading}
-              className="flex size-7 shrink-0 items-center justify-center rounded-full text-muted-foreground transition-colors hover:bg-background/80 hover:text-foreground"
-              aria-label="清除所选技能"
-            >
-              <X className="size-3.5" />
-            </button>
-          </div>
-        ) : null}
-        <div className="flex min-h-[44px] min-w-0 flex-1 basis-full items-end gap-2 sm:min-h-0 sm:basis-0 sm:min-w-[8rem]">
-          <textarea
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter' && !e.shiftKey) {
-                e.preventDefault();
-                handleSubmit(e as any);
-              }
-            }}
-            placeholder={
-              !isReady
-                ? ''
-                : canChat
-                  ? '有问题，尽管问'
-                  : '登录后开始对话'
-            }
-            className="min-h-[44px] max-h-[200px] min-w-0 flex-1 resize-none border-none bg-transparent py-2.5 pl-0 pr-1 text-[15px] leading-normal text-foreground placeholder:text-muted-foreground focus:outline-none sm:min-h-[40px] sm:py-2 sm:leading-6"
-            rows={1}
-            disabled={!canChat || isLoading}
-          />
-          <button
-            type="submit"
-            disabled={!canChat || !input.trim() || isLoading}
-            className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-foreground text-background transition-all hover:opacity-90 disabled:opacity-25 dark:bg-white dark:text-black"
-            aria-label="发送"
-          >
-            <ArrowUp size={20} strokeWidth={2.5} />
-          </button>
-        </div>
-      </div>
-    </form>
-  );
-
   return (
     <main className="relative flex h-full min-h-0 flex-col overflow-hidden bg-gpt-main text-foreground safe-area-pt">
-      <header className="z-20 flex min-h-14 shrink-0 items-center gap-2 px-3 sm:gap-3 sm:px-4">
-        <div className="flex min-w-0 flex-1 items-center gap-2">
-          {sidebarCollapsed && (
-            <button
-              type="button"
-              onClick={onOpenSidebar}
-              className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg text-muted-foreground transition-colors hover:bg-black/[0.06] dark:hover:bg-white/10"
-              aria-label="打开侧边栏"
-            >
-              <PanelLeft size={20} />
-            </button>
-          )}
-          <div className="relative min-w-0 w-auto max-w-[min(100vw-8rem,280px)] shrink-0 sm:max-w-[min(100vw-10rem,280px)]">
-            <ModelSelect
-              id="chat-header-model"
-              value={resolvedModelValue}
-              onChange={(v) => void handleModelChange(v)}
-              options={chatModelOptions}
-              className="w-full"
-              disabled={!canChat}
-            />
-          </div>
-          {isLoading && (
-            <button
-              type="button"
-              onClick={handleStop}
-              className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg transition-colors hover:bg-red-500/10 dark:hover:bg-red-500/20"
-              aria-label="停止生成"
-            >
-              <Square size={18} className="text-red-500" />
-            </button>
-          )}
-        </div>
-      </header>
+      <ChatHeader
+        sidebarCollapsed={sidebarCollapsed}
+        onOpenSidebar={onOpenSidebar}
+        resolvedModelValue={resolvedModelValue}
+        chatModelOptions={chatModelOptions}
+        handleModelChange={handleModelChange}
+        canChat={canChat}
+        isLoading={isLoading}
+        handleStop={handleStop}
+      />
+      <WorkModeBanner
+        title={workModeSummary.title}
+        description={workModeSummary.description}
+        chips={workModeSummary.chips}
+      />
 
       {shellLoading ? (
         <ChatShellSkeleton />
@@ -1621,70 +1905,86 @@ export default function NexusChat({
             <div className="flex w-full max-w-3xl flex-col items-center gap-8">
               <div className="text-center">
                 <h2 className="text-[1.65rem] font-normal leading-snug tracking-tight text-foreground sm:text-3xl">
-                  你今天在想什么？
+                  说出任务目标，我来帮你把它做完。
                 </h2>
-                <p className="mt-3 max-w-md text-sm text-muted-foreground">
-                  向 Nexus 提问、调用远程能力或与 MCP 工具协作。
+                <p className="mt-3 max-w-xl text-sm leading-6 text-muted-foreground">
+                  你可以直接提问、整理资料、生成内容、做图表，或者先让我判断该调用哪种能力。
                 </p>
               </div>
-              {typingIndicator}
-              {composerForm}
+              <div className="grid w-full max-w-3xl gap-3 sm:grid-cols-3">
+                {[
+                  '帮我整理一份竞品调研提纲，并列出下一步访谈问题',
+                  '把这组数据做成图表，并告诉我最值得关注的异常点',
+                  '根据会议纪要生成一封对外同步邮件，语气专业但简洁',
+                ].map((prompt) => (
+                  <button
+                    key={prompt}
+                    type="button"
+                    onClick={() => setInput(prompt)}
+                    className="rounded-2xl border border-border/70 bg-background/70 px-4 py-3 text-left text-sm leading-6 text-foreground transition-colors hover:bg-muted/40"
+                  >
+                    {prompt}
+                  </button>
+                ))}
+              </div>
+              {!selectedSkill ? (
+                <SkillSuggestions
+                  skills={recommendedSkills}
+                  onSelect={setSelectedSkill}
+                />
+              ) : null}
+              <TypingIndicator visible={showTypingIndicator} />
+              <ChatComposer
+                handleSubmit={handleSubmit}
+                canChat={canChat}
+                isLoading={isLoading}
+                thinkingModeEnabled={thinkingModeEnabled}
+                setThinkingModeEnabled={setThinkingModeEnabled}
+                selectedSkill={selectedSkill}
+                setSkillSheetOpen={setSkillSheetOpen}
+                setSelectedSkill={setSelectedSkill}
+                input={input}
+                setInput={setInput}
+                isReady={isReady}
+              />
             </div>
           </div>
         </div>
       ) : (
         <>
-          <div
-            ref={scrollRef}
-            className="min-h-0 flex-1 space-y-6 overflow-y-auto scroll-smooth px-3 py-4 sm:px-4 scrollbar-none"
-          >
-            {localMessages.map((msg) => {
-              const isThisAssistantStreaming =
-                msg.role === 'assistant' &&
-                isLoading &&
-                msg.id === streamingAssistantId;
-              /** 娴佸紡鐢熸垚涓笉灞曠ず澶嶅埗/閲嶆柊鐢熸垚锛岀瓑鏈潯鍔╂墜鍥炲缁撴潫鍚庡啀鏄剧ず */
-              const showAssistantActions =
-                msg.role === 'assistant' && !isThisAssistantStreaming;
-
-              return (
-              <div key={msg.id} className="space-y-2">
-                {msg.role === 'assistant' &&
-                  ((msg.thinkingLog && msg.thinkingLog.length > 0) ||
-                    (thinkingModeEnabled &&
-                      isLoading &&
-                      msg.id === streamingAssistantId)) && (
-                  <ThinkingTrace
-                    logs={msg.thinkingLog ?? []}
-                    stepDurationsMs={msg.thinkingStepDurationsMs}
-                    isLoading={Boolean(
-                      isLoading && msg.id === streamingAssistantId,
-                    )}
-                  />
-                )}
-                {!thinkingModeEnabled &&
-                  isThisAssistantStreaming &&
-                  !msg.content.trim() && <AssistantStreamDots />}
-                <ChatMessage
-                  message={msg as any}
-                  onCopyAssistant={
-                    showAssistantActions
-                      ? () => void handleCopyAssistant(msg.content)
-                      : undefined
-                  }
-                  onRegenerate={
-                    showAssistantActions
-                      ? () => void handleRegenerateAssistant(msg.id)
-                      : undefined
-                  }
-                  regenerateDisabled={isLoading}
+          <ChatMessageList
+            localMessages={deferredMessages}
+            regenerateDisabled={isLoading}
+            streamingAssistantId={streamingAssistantId}
+            thinkingModeEnabled={thinkingModeEnabled}
+            handleCopyAssistant={handleCopyAssistant}
+            handleRegenerateAssistant={handleRegenerateAssistant}
+            scrollRef={scrollRef}
+            showTypingIndicator={showTypingIndicator}
+          />
+          <div className="shrink-0 px-3 pt-2 sm:px-4 pb-safe-composer">
+            {!selectedSkill && input.trim().length > 0 ? (
+              <div className="mb-3">
+                <SkillSuggestions
+                  skills={recommendedSkills}
+                  onSelect={setSelectedSkill}
                 />
               </div>
-            );
-            })}
-            {typingIndicator}
+            ) : null}
+            <ChatComposer
+              handleSubmit={handleSubmit}
+              canChat={canChat}
+              isLoading={isLoading}
+              thinkingModeEnabled={thinkingModeEnabled}
+              setThinkingModeEnabled={setThinkingModeEnabled}
+              selectedSkill={selectedSkill}
+              setSkillSheetOpen={setSkillSheetOpen}
+              setSelectedSkill={setSelectedSkill}
+              input={input}
+              setInput={setInput}
+              isReady={isReady}
+            />
           </div>
-          <div className="shrink-0 px-3 pt-2 sm:px-4 pb-safe-composer">{composerForm}</div>
         </>
       )}
       <SkillStoreSheet

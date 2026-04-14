@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { lantuClient } from '@/lib/lantu-client';
+import { getLantuClient } from '@/lib/runtime/lazy-services';
 
 export async function GET(request: NextRequest) {
   const searchParams = request.nextUrl.searchParams;
@@ -10,6 +10,7 @@ export async function GET(request: NextRequest) {
   const page = searchParams.get('page') ? parseInt(searchParams.get('page')!) : undefined;
   const pageSize = searchParams.get('pageSize') ? parseInt(searchParams.get('pageSize')!) : undefined;
 
+  const lantuClient = await getLantuClient();
   const result = await lantuClient.fetchResources({
     resourceType,
     status,
