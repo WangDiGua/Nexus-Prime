@@ -8,9 +8,9 @@ export interface CreateMessageData {
   conversationId: string;
   role: 'USER' | 'ASSISTANT' | 'SYSTEM';
   content: string;
-  toolCalls?: Record<string, unknown>;
-  toolResults?: Record<string, unknown>;
-  thinkingLog?: Record<string, unknown>;
+  toolCalls?: unknown;
+  toolResults?: unknown;
+  thinkingLog?: unknown;
   thinkingStepDurationsMs?: number[];
   tokensUsed?: number;
   latencyMs?: number;
@@ -45,9 +45,9 @@ export interface MessageWithInvocations {
   }>;
 }
 
-function toJson(value: Record<string, unknown> | undefined): Prisma.InputJsonValue | undefined {
+function toJson(value: unknown): Prisma.InputJsonValue | undefined {
   if (!value) return undefined;
-  return value as Prisma.InputJsonValue;
+  return JSON.parse(JSON.stringify(value)) as Prisma.InputJsonValue;
 }
 
 /** Accepts object or array from JSON body; strips non-JSON-safe values. */
@@ -82,9 +82,9 @@ export class MessageService {
         content: data.content,
         toolCalls: toJson(data.toolCalls),
         toolResults: toJson(data.toolResults),
-        thinkingLog: toPrismaJsonField(data.thinkingLog as unknown),
+        thinkingLog: toPrismaJsonField(data.thinkingLog),
         thinkingStepDurationsMs: toPrismaJsonField(
-          data.thinkingStepDurationsMs as unknown
+          data.thinkingStepDurationsMs
         ),
         tokensUsed: data.tokensUsed || 0,
         latencyMs: data.latencyMs || 0,

@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect } from 'react';
+import React, { useState } from 'react';
 import {
   Database,
   FileText,
@@ -57,7 +57,7 @@ interface CapabilityHubProps {
   onToggleCollapse?: () => void;
   /** 已登录时传入，用于退出登录 */
   onLogout?: () => void | Promise<void>;
-  /** 移动端抽屉内选会话/新建后收起抽屉 */
+  /** 移动端抽屉内会话，新建后收起抽屉 */
   onCloseMobile?: () => void;
 }
 
@@ -72,7 +72,8 @@ export default function CapabilityHub({
   const [activeTab, setActiveTab] = useState<TabType>('conversations');
   const { user, isAuthenticated, isReady, openLogin } = useAuth();
   const { addPacket } = useRegistryStore();
-  const { activeConversationId, setActiveConversation, clearMessages } = useConversationStore();
+  const { activeConversationId, setActiveConversation, clearMessages } =
+    useConversationStore();
 
   const { data, isLoading, refetch, isFetching } = useQuery({
     queryKey: ['capabilities'],
@@ -93,11 +94,11 @@ export default function CapabilityHub({
         method: 'POST',
         endpoint: skill.endpoint,
         status: 200,
-        time: `${Date.now() - startTime}ms`,
+        time: String(Date.now() - startTime) + 'ms',
         payload: { manual: true, skill: skill.name },
         response: result,
       });
-    } catch (e) {
+    } catch {
       setTriggerResult({ status: 'error', message: '触发失败' });
     } finally {
       setIsTriggering(false);
@@ -115,7 +116,7 @@ export default function CapabilityHub({
     onCloseMobile?.();
   };
 
-  const iconMap: Record<string, any> = {
+  const iconMap: Record<string, React.ComponentType<{ size?: number }>> = {
     FileText,
     Database,
     Mail,
@@ -126,7 +127,7 @@ export default function CapabilityHub({
   const navButton = (
     id: TabType,
     label: string,
-    Icon: React.ComponentType<{ size?: number; className?: string }>
+    Icon: React.ComponentType<{ size?: number; className?: string }>,
   ) => (
     <button
       type="button"
@@ -135,7 +136,7 @@ export default function CapabilityHub({
         'w-full flex items-center gap-3 rounded-lg px-3 py-2.5 text-left text-sm transition-colors',
         activeTab === id
           ? 'bg-black/[0.06] text-foreground dark:bg-white/10'
-          : 'text-muted-foreground hover:bg-black/[0.04] dark:hover:bg-white/[0.05]'
+          : 'text-muted-foreground hover:bg-black/[0.04] dark:hover:bg-white/[0.05]',
       )}
     >
       <Icon size={18} className="shrink-0 opacity-80" />
@@ -171,7 +172,7 @@ export default function CapabilityHub({
                 'flex h-10 w-10 items-center justify-center rounded-lg',
                 activeTab === 'conversations'
                   ? 'bg-black/[0.06] dark:bg-white/10 text-foreground'
-                  : 'text-muted-foreground hover:bg-black/[0.06] dark:hover:bg-white/10'
+                  : 'text-muted-foreground hover:bg-black/[0.06] dark:hover:bg-white/10',
               )}
               onClick={() => setActiveTab('conversations')}
             >
@@ -186,7 +187,7 @@ export default function CapabilityHub({
                 'flex h-10 w-10 items-center justify-center rounded-lg',
                 activeTab === 'resources'
                   ? 'bg-black/[0.06] dark:bg-white/10 text-foreground'
-                  : 'text-muted-foreground hover:bg-black/[0.06] dark:hover:bg-white/10'
+                  : 'text-muted-foreground hover:bg-black/[0.06] dark:hover:bg-white/10',
               )}
               onClick={() => setActiveTab('resources')}
             >
@@ -246,7 +247,7 @@ export default function CapabilityHub({
             >
               <PanelLeft size={18} />
             </TooltipTrigger>
-            <TooltipContent side="bottom">收起边栏</TooltipContent>
+            <TooltipContent side="bottom">收起侧边栏</TooltipContent>
           </Tooltip>
         </TooltipProvider>
       </div>
@@ -399,7 +400,7 @@ export default function CapabilityHub({
                                         'rounded-2xl border p-4 font-mono text-[10px] animate-ios-fade-in',
                                         triggerResult.status === 'success'
                                           ? 'border-emerald-500/20 bg-emerald-500/5 text-emerald-600'
-                                          : 'border-red-500/20 bg-red-500/5 text-red-600'
+                                          : 'border-red-500/20 bg-red-500/5 text-red-600',
                                       )}
                                     >
                                       <pre className="overflow-x-auto">
@@ -456,7 +457,7 @@ export default function CapabilityHub({
             onClick={openLogin}
             className={cn(
               'flex w-full items-center gap-2 rounded-xl px-2 py-2 text-left text-sm font-medium text-foreground transition-colors',
-              'hover:bg-black/[0.04] dark:hover:bg-white/[0.05]'
+              'hover:bg-black/[0.04] dark:hover:bg-white/[0.05]',
             )}
           >
             <LogIn size={20} className="shrink-0 opacity-90" strokeWidth={2} />

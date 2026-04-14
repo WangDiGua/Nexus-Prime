@@ -15,8 +15,9 @@ export interface Message {
   conversationId: string;
   role: 'USER' | 'ASSISTANT' | 'SYSTEM';
   content: string;
-  toolCalls: Record<string, unknown> | null;
-  toolResults: Record<string, unknown> | null;
+  toolCalls: unknown;
+  toolResults: unknown;
+  toolInvocations?: Array<Record<string, unknown>> | null;
   thinkingLog: string[] | null;
   thinkingStepDurationsMs?: number[] | null;
   tokensUsed: number;

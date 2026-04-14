@@ -15,6 +15,14 @@ export interface ToolResult {
   cached?: boolean;
 }
 
+export interface ToolInvocationView {
+  toolCallId: string;
+  toolName: string;
+  args: Record<string, unknown>;
+  state: 'calling' | 'result';
+  result?: ToolResult;
+}
+
 export interface ChatMessage {
   id: string;
   role: 'user' | 'assistant' | 'system' | 'tool';

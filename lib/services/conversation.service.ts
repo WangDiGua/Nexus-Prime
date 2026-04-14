@@ -36,6 +36,19 @@ export interface ConversationWithMessages {
     thinkingStepDurationsMs: unknown;
     tokensUsed: number;
     latencyMs: number;
+    toolInvocations: Array<{
+      id: string;
+      toolName: string;
+      resourceType: string | null;
+      resourceId: string | null;
+      arguments: Record<string, unknown> | null;
+      result: Record<string, unknown> | null;
+      status: string;
+      errorMessage: string | null;
+      latencyMs: number;
+      cached: boolean;
+      createdAt: Date;
+    }>;
   }>;
 }
 
@@ -83,6 +96,22 @@ export class ConversationService {
                 thinkingStepDurationsMs: true,
                 tokensUsed: true,
                 latencyMs: true,
+                toolInvocations: {
+                  orderBy: { createdAt: 'asc' },
+                  select: {
+                    id: true,
+                    toolName: true,
+                    resourceType: true,
+                    resourceId: true,
+                    arguments: true,
+                    result: true,
+                    status: true,
+                    errorMessage: true,
+                    latencyMs: true,
+                    cached: true,
+                    createdAt: true,
+                  },
+                },
               },
             },
           }

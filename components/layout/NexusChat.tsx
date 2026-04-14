@@ -1,4 +1,4 @@
-'use client';
+﻿'use client';
 
 import React, { useRef, useEffect, useState, useCallback, useMemo } from 'react';
 import {
@@ -31,7 +31,12 @@ import { toast } from '@/lib/toast';
 import { useRegistryStore } from '@/hooks/use-registry-store';
 import { useConversationStore } from '@/hooks/use-conversation-store';
 import type { Message as StoredMessage } from '@/hooks/use-conversation-store';
-import type { ChatSSEEvent, ToolCall, ToolResult } from '@/types/chat';
+import type {
+  ChatSSEEvent,
+  ToolCall,
+  ToolInvocationView,
+  ToolResult,
+} from '@/types/chat';
 import {
   SkillStoreSheet,
   type ChatSelectedSkill,
@@ -46,15 +51,9 @@ interface Message {
   id: string;
   role: 'user' | 'assistant' | 'system';
   content: string;
-  toolInvocations?: Array<{
-    toolCallId: string;
-    toolName: string;
-    args: Record<string, unknown>;
-    state: 'calling' | 'result';
-    result?: ToolResult;
-  }>;
+  toolInvocations?: ToolInvocationView[];
   thinkingLog?: string[];
-  /** 与 thinkingLog 等长，每步耗时（毫秒） */
+  /** 涓?thinkingLog 绛夐暱锛屾瘡姝ヨ€楁椂锛堟绉掞級 */
   thinkingStepDurationsMs?: number[];
 }
 
@@ -66,7 +65,51 @@ function parseThinkingStepDurations(raw: unknown): number[] | undefined {
   return undefined;
 }
 
-/** 将服务端/ store 消息转为 NexusChat 本地 Message */
+function normalizeToolInvocations(
+  raw: unknown,
+): ToolInvocationView[] | undefined {
+  if (raw == null) return undefined;
+  const items = Array.isArray(raw)
+    ? raw
+    : typeof raw === 'object'
+      ? Object.values(raw as Record<string, unknown>)
+      : [];
+
+  const normalized = items
+    .map((item, index) => {
+      if (!item || typeof item !== 'object') return null;
+      const value = item as Record<string, unknown>;
+      const result = value.result;
+      const toolCallId = String(
+        value.toolCallId ?? value.id ?? 'tool_' + index,
+      );
+      const toolName = String(value.toolName ?? 'tool');
+      const args =
+        value.args && typeof value.args === 'object' && !Array.isArray(value.args)
+          ? (value.args as Record<string, unknown>)
+          : {};
+      const state =
+        value.state === 'calling' || value.state === 'result'
+          ? (value.state as 'calling' | 'result')
+          : 'result';
+      const normalizedResult =
+        result && typeof result === 'object' && !Array.isArray(result)
+          ? ({ ...result } as ToolResult)
+          : undefined;
+      return {
+        toolCallId,
+        toolName,
+        args,
+        state,
+        result: normalizedResult,
+      };
+    })
+    .filter(Boolean) as ToolInvocationView[];
+
+  return normalized.length > 0 ? normalized : undefined;
+}
+
+/** 灏嗘湇鍔＄/ store 娑堟伅杞负 NexusChat 鏈湴 Message */
 function mapStoredToLocalMessage(m: StoredMessage): Message {
   return {
     id: m.id,
@@ -74,10 +117,11 @@ function mapStoredToLocalMessage(m: StoredMessage): Message {
     content: m.content,
     thinkingLog: m.thinkingLog || undefined,
     thinkingStepDurationsMs: parseThinkingStepDurations(m.thinkingStepDurationsMs),
+    toolInvocations: normalizeToolInvocations(m.toolResults),
   };
 }
 
-/** 本地消息 → store 形态，供 localStorage 缓存（createdAt 用占位，避免防抖序列化抖动） */
+/** 鏈湴娑堟伅 鈫?store 褰㈡€侊紝渚?localStorage 缂撳瓨锛坈reatedAt 鐢ㄥ崰浣嶏紝閬垮厤闃叉姈搴忓垪鍖栨姈鍔級 */
 function localMessagesToStored(
   conversationId: string,
   local: Message[],
@@ -93,7 +137,7 @@ function localMessagesToStored(
           : 'USER',
     content: m.content,
     toolCalls: null,
-    toolResults: null,
+    toolResults: m.toolInvocations ?? null,
     thinkingLog: m.thinkingLog ?? null,
     thinkingStepDurationsMs: m.thinkingStepDurationsMs ?? null,
     tokensUsed: 0,
@@ -110,6 +154,7 @@ function messagesCacheFingerprint(local: Message[]): string {
       content: m.content,
       thinkingLog: m.thinkingLog,
       thinkingStepDurationsMs: m.thinkingStepDurationsMs,
+      toolInvocations: m.toolInvocations,
     })),
   );
 }
@@ -123,9 +168,9 @@ function ThinkingTrace({
   stepDurationsMs?: number[];
   isLoading: boolean;
 }) {
-  /** 加载结束后可手动展开；加载中强制展开 */
+  /** 鍔犺浇缁撴潫鍚庡彲鎵嬪姩灞曞紑锛涘姞杞戒腑寮哄埗灞曞紑 */
   const [expandedAfterDone, setExpandedAfterDone] = useState(false);
-  /** 已完成步骤：默认单行收起，点击展开全文 */
+  /** 宸插畬鎴愭楠わ細榛樿鍗曡鏀惰捣锛岀偣鍑诲睍寮€鍏ㄦ枃 */
   const [expandedSteps, setExpandedSteps] = useState<Record<number, boolean>>({});
   const [liveLastMs, setLiveLastMs] = useState(0);
   const lastStepStartRef = useRef(0);
@@ -317,7 +362,7 @@ function ThinkingTrace({
                   title={showCollapsedReasoningTitle ? text : undefined}
                 >
                   {showCollapsedReasoningTitle
-                    ? `第 ${reasoningRound} 轮思考`
+                    ? '第' + reasoningRound + ' 轮思考'
                     : text}
                 </span>
                 {durationMs !== undefined && (
@@ -346,7 +391,7 @@ function ThinkingTrace({
                 )}
               >
                 <p className="mb-1.5 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
-                  当前思考
+                  褰撳墠鎬濊€?
                 </p>
                 <div
                   className={cn(
@@ -383,7 +428,7 @@ function ThinkingTrace({
   );
 }
 
-/** 未开思考模式时：首包前在左侧显示三点，避免空白像卡死 */
+/** 鏈紑鎬濊€冩ā寮忔椂锛氶鍖呭墠鍦ㄥ乏渚ф樉绀轰笁鐐癸紝閬垮厤绌虹櫧鍍忓崱姝?*/
 function AssistantStreamDots() {
   return (
     <div
@@ -400,7 +445,7 @@ function AssistantStreamDots() {
   );
 }
 
-/** 会话区与输入条骨架：避免「恢复会话」与「请登录」文案同时出现 */
+/** 浼氳瘽鍖轰笌杈撳叆鏉￠鏋讹細閬垮厤銆屾仮澶嶄細璇濄€嶄笌銆岃鐧诲綍銆嶆枃妗堝悓鏃跺嚭鐜?*/
 function ChatShellSkeleton() {
   return (
     <div className="flex min-h-0 flex-1 flex-col" aria-busy="true" aria-label="加载中">
@@ -450,11 +495,11 @@ export default function NexusChat({
   const [isLoading, setIsLoading] = useState(false);
   const [abortController, setAbortController] = useState<AbortController | null>(null);
   /**
-   * 必须与 SSR 首屏一致：不可在 useState 初始值里读 hasHydrated()，
-   * 否则客户端首帧可能已为 true，服务端始终为 false，触发 hydration mismatch。
+   * 蹇呴』涓?SSR 棣栧睆涓€鑷达細涓嶅彲鍦?useState 鍒濆鍊奸噷璇?hasHydrated()锛?
+   * 鍚﹀垯瀹㈡埛绔甯у彲鑳藉凡涓?true锛屾湇鍔＄濮嬬粓涓?false锛岃Е鍙?hydration mismatch銆?
    */
   const [persistHydrated, setPersistHydrated] = useState(false);
-  /** 正在从服务端拉取当前会话消息（刷新后） */
+  /** 姝ｅ湪浠庢湇鍔＄鎷夊彇褰撳墠浼氳瘽娑堟伅锛堝埛鏂板悗锛?*/
   const [messagesRestoring, setMessagesRestoring] = useState(false);
 
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -488,10 +533,10 @@ export default function NexusChat({
       });
       if (!response.ok) {
         const err = await response.json().catch(() => ({} as { error?: string }));
-        toast.error(err.error || '默认模型同步失败');
+        toast.error(err.error || '榛樿妯″瀷鍚屾澶辫触');
       }
     } catch {
-      toast.error('默认模型同步失败');
+      toast.error('榛樿妯″瀷鍚屾澶辫触');
     }
   };
 
@@ -507,12 +552,12 @@ export default function NexusChat({
     return known ? normalized! : chatModelOptions[0]?.value ?? '';
   }, [chatModelOptions, config.model]);
 
-  /** 当前这次请求对应的助手消息 id（首包 SSE 前已插入占位，避免误用「上一条助手」） */
+  /** 褰撳墠杩欐璇锋眰瀵瑰簲鐨勫姪鎵嬫秷鎭?id锛堥鍖?SSE 鍓嶅凡鎻掑叆鍗犱綅锛岄伩鍏嶈鐢ㄣ€屼笂涓€鏉″姪鎵嬨€嶏級 */
   const [streamingAssistantId, setStreamingAssistantId] = useState<string | null>(
     null,
   );
 
-  /** 是否向百炼请求思考链（reasoning）；持久化到 localStorage */
+  /** 鏄惁鍚戠櫨鐐艰姹傛€濊€冮摼锛坮easoning锛夛紱鎸佷箙鍖栧埌 localStorage */
   const [thinkingModeEnabled, setThinkingModeEnabled] = useState(false);
   useEffect(() => {
     try {
@@ -534,7 +579,7 @@ export default function NexusChat({
     }
   }, [thinkingModeEnabled]);
 
-  /** 选中的技能作为 chat 入口资源（entryResource），影响聚合工具列表 */
+  /** 閫変腑鐨勬妧鑳戒綔涓?chat 鍏ュ彛璧勬簮锛坋ntryResource锛夛紝褰卞搷鑱氬悎宸ュ叿鍒楄〃 */
   const [selectedSkill, setSelectedSkill] = useState<ChatSelectedSkill | null>(
     null,
   );
@@ -567,12 +612,12 @@ export default function NexusChat({
   }, [selectedSkill]);
 
   const prevActiveConversationId = useRef<string | null>(activeConversationId);
-  /** 仅用于恢复拉取：首帧为 null，便于在「刷新 / 首次进入带 id」时与当前 id 比较为已变化，从而必定请求服务端 */
+  /** 浠呯敤浜庢仮澶嶆媺鍙栵細棣栧抚涓?null锛屼究浜庡湪銆屽埛鏂?/ 棣栨杩涘叆甯?id銆嶆椂涓庡綋鍓?id 姣旇緝涓哄凡鍙樺寲锛屼粠鑰屽繀瀹氳姹傛湇鍔＄ */
   const restorePrevConversationIdRef = useRef<string | null>(null);
   const localMessagesRef = useRef<Message[]>([]);
   localMessagesRef.current = localMessages;
 
-  /** 服务端/持久化 store 更新时同步到本地；与本地指纹一致则跳过，避免与「本地→store 防抖」互相打架 */
+  /** 鏈嶅姟绔?鎸佷箙鍖?store 鏇存柊鏃跺悓姝ュ埌鏈湴锛涗笌鏈湴鎸囩汗涓€鑷村垯璺宠繃锛岄伩鍏嶄笌銆屾湰鍦扳啋store 闃叉姈銆嶄簰鐩告墦鏋?*/
   useEffect(() => {
     if (storedMessages.length === 0) return;
     const fromStored = storedMessages.map(mapStoredToLocalMessage);
@@ -587,7 +632,7 @@ export default function NexusChat({
 
   const lastPersistedFingerprintRef = useRef<string>('');
 
-  /** 本地对话 → zustand persist（localStorage），实现浏览器侧缓存，供刷新后先展示再与 DB 对齐 */
+  /** 鏈湴瀵硅瘽 鈫?zustand persist锛坙ocalStorage锛夛紝瀹炵幇娴忚鍣ㄤ晶缂撳瓨锛屼緵鍒锋柊鍚庡厛灞曠ず鍐嶄笌 DB 瀵归綈 */
   useEffect(() => {
     if (!activeConversationId || !persistHydrated) return;
 
@@ -603,11 +648,11 @@ export default function NexusChat({
   }, [localMessages, activeConversationId, persistHydrated, setStoredMessages]);
 
   /**
-   * 类缓存策略：persist 重hydrate 后若有与当前会话 id 一致的本地 messages，先直接展示（浏览器一级缓存），
-   * 同时后台请求数据库并以服务端结果为准覆盖；无本地缓存时才显示「恢复中」。
-   * 同一会话且正在流式时不拉取，避免覆盖乐观 UI。
-   * 切勿将 isLoading 列入依赖：流式结束 isLoading→false 会再次跑本 effect 并请求 API，
-   * 若请求早于助手消息落库或与 DB 竞态，会用不完整列表覆盖 localMessages，导致「回复后内容消失」。
+   * 绫荤紦瀛樼瓥鐣ワ細persist 閲峢ydrate 鍚庤嫢鏈変笌褰撳墠浼氳瘽 id 涓€鑷寸殑鏈湴 messages锛屽厛鐩存帴灞曠ず锛堟祻瑙堝櫒涓€绾х紦瀛橈級锛?
+   * 鍚屾椂鍚庡彴璇锋眰鏁版嵁搴撳苟浠ユ湇鍔＄缁撴灉涓哄噯瑕嗙洊锛涙棤鏈湴缂撳瓨鏃舵墠鏄剧ず銆屾仮澶嶄腑銆嶃€?
+   * 鍚屼竴浼氳瘽涓旀鍦ㄦ祦寮忔椂涓嶆媺鍙栵紝閬垮厤瑕嗙洊涔愯 UI銆?
+   * 鍒囧嬁灏?isLoading 鍒楀叆渚濊禆锛氭祦寮忕粨鏉?isLoading鈫抐alse 浼氬啀娆¤窇鏈?effect 骞惰姹?API锛?
+   * 鑻ヨ姹傛棭浜庡姪鎵嬫秷鎭惤搴撴垨涓?DB 绔炴€侊紝浼氱敤涓嶅畬鏁村垪琛ㄨ鐩?localMessages锛屽鑷淬€屽洖澶嶅悗鍐呭娑堝け銆嶃€?
    */
   useEffect(() => {
     if (!canChat || !activeConversationId) {
@@ -626,8 +671,8 @@ export default function NexusChat({
     }
 
     /**
-     * 首条消息会先 setIsLoading(true)，再 POST 创建会话并 setActiveConversation(null→id)。
-     * 此时若按「会话切换」清空并拉取，会抹掉乐观插入的用户/助手占位。
+     * 棣栨潯娑堟伅浼氬厛 setIsLoading(true)锛屽啀 POST 鍒涘缓浼氳瘽骞?setActiveConversation(null鈫抜d)銆?
+     * 姝ゆ椂鑻ユ寜銆屼細璇濆垏鎹€嶆竻绌哄苟鎷夊彇锛屼細鎶规帀涔愯鎻掑叆鐨勭敤鎴?鍔╂墜鍗犱綅銆?
      */
     if (conversationChanged && prev === null && isLoading) {
       restorePrevConversationIdRef.current = activeConversationId;
@@ -636,7 +681,7 @@ export default function NexusChat({
 
     restorePrevConversationIdRef.current = activeConversationId;
 
-    /** 仅会话 A→B 切换时清空；刷新(null→id) 保留已重hydrate 的本地缓存 */
+    /** 浠呬細璇?A鈫払 鍒囨崲鏃舵竻绌猴紱鍒锋柊(null鈫抜d) 淇濈暀宸查噸hydrate 鐨勬湰鍦扮紦瀛?*/
     const switchedConversation =
       conversationChanged &&
       prev !== null &&
@@ -657,9 +702,7 @@ export default function NexusChat({
     }
     void (async () => {
       try {
-        const response = await fetch(
-          `/api/conversations/${activeConversationId}?messages=true`
-        );
+        const response = await fetch('/api/conversations/' + activeConversationId + '?messages=true');
         if (!response.ok || cancelled) return;
         const conversation = await response.json();
         if (cancelled) return;
@@ -674,7 +717,9 @@ export default function NexusChat({
           content: m.content as string,
           toolCalls: (m.toolCalls as Record<string, unknown> | null) ?? null,
           toolResults:
-            (m.toolResults as Record<string, unknown> | null) ?? null,
+            (m.toolResults as unknown) ??
+            (m.toolInvocations as unknown) ??
+            null,
           thinkingLog: m.thinkingLog
             ? Object.values(m.thinkingLog as Record<string, unknown>)
             : null,
@@ -701,10 +746,10 @@ export default function NexusChat({
       cancelled = true;
       setMessagesRestoring(false);
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- isLoading 不列入，避免流式结束后重复拉 API 覆盖界面
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- isLoading 涓嶅垪鍏ワ紝閬垮厤娴佸紡缁撴潫鍚庨噸澶嶆媺 API 瑕嗙洊鐣岄潰
   }, [canChat, activeConversationId, setStoredMessages, persistHydrated]);
 
-  /** 仅在「新建会话」从有 id → null 时清空本地消息 */
+  /** 浠呭湪銆屾柊寤轰細璇濄€嶄粠鏈?id 鈫?null 鏃舵竻绌烘湰鍦版秷鎭?*/
   useEffect(() => {
     const prev = prevActiveConversationId.current;
     if (prev !== null && activeConversationId === null) {
@@ -726,11 +771,12 @@ export default function NexusChat({
     thinkingLog?: string[],
     thinkingStepDurationsMs?: number[],
     tokensUsed?: number,
-    /** 当前轮次使用的模型 id（与头部 ModelSelect / 服务端 chat 一致） */
+    toolResults?: unknown,
+    /** 褰撳墠杞浣跨敤鐨勬ā鍨?id锛堜笌澶撮儴 ModelSelect / 鏈嶅姟绔?chat 涓€鑷达級 */
     model?: string
   ) => {
     try {
-      const response = await fetch(`/api/conversations/${conversationId}/messages`, {
+      const response = await fetch('/api/conversations/' + conversationId + '/messages', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -742,6 +788,7 @@ export default function NexusChat({
               ? thinkingStepDurationsMs
               : null,
           tokensUsed: tokensUsed || 0,
+          ...(toolResults ? { toolResults } : {}),
           ...(model ? { model } : {}),
         }),
       });
@@ -776,7 +823,7 @@ export default function NexusChat({
       conversationId: string | null;
       controller: AbortController;
       enableThinking: boolean;
-      /** 未选技能时由服务端使用默认 entry（api-config） */
+      /** 鏈€夋妧鑳芥椂鐢辨湇鍔＄浣跨敤榛樿 entry锛坅pi-config锛?*/
       entrySkill: ChatSelectedSkill | null;
     }) => {
       const {
@@ -788,18 +835,18 @@ export default function NexusChat({
         entrySkill,
       } = params;
 
-      /** 未开启「思考」时不展示/不落库 ReAct 思维链（仍走工具调用与正文流） */
+      /** 鏈紑鍚€屾€濊€冦€嶆椂涓嶅睍绀?涓嶈惤搴?ReAct 鎬濈淮閾撅紙浠嶈蛋宸ュ叿璋冪敤涓庢鏂囨祦锛?*/
       const collectThinkingUi = enableThinking;
 
-      /** 本轮请求对应的模型（与头部选择器一致，供落库） */
+      /** 鏈疆璇锋眰瀵瑰簲鐨勬ā鍨嬶紙涓庡ご閮ㄩ€夋嫨鍣ㄤ竴鑷达紝渚涜惤搴擄級 */
       const modelForThisTurn = resolvedModelValue;
 
       let currentContent = '';
-      let currentToolInvocations: Message['toolInvocations'] = [];
+      let currentToolInvocations: NonNullable<Message['toolInvocations']> = [];
       let currentThinkingLog: string[] = [];
       let currentThinkingDurationsMs: number[] = [];
       let thinkingStepStartedAt = Date.now();
-      /** 是否处于同一轮「模型思考」流式片段中（reasoning_delta） */
+      /** 鏄惁澶勪簬鍚屼竴杞€屾ā鍨嬫€濊€冦€嶆祦寮忕墖娈典腑锛坮easoning_delta锛?*/
       let reasoningDeltaOpen = false;
 
       const finalizeLastThinkingStep = () => {
@@ -831,7 +878,7 @@ export default function NexusChat({
         });
 
         if (!response.ok) {
-          throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+          throw new Error('HTTP ' + response.status + ': ' + response.statusText);
         }
 
         const reader = response.body?.getReader();
@@ -995,10 +1042,10 @@ export default function NexusChat({
                     });
 
                     addPacket({
-                      id: `call_${toolCall.id}`,
+                      id: 'call_' + toolCall.id,
                       type: '工具',
                       method: 'POST',
-                      endpoint: `/invoke/${toolCall.name}`,
+                      endpoint: '/invoke/' + toolCall.name,
                       status: 0,
                       time: '调用中...',
                       payload: toolCall.args
@@ -1045,12 +1092,12 @@ export default function NexusChat({
                       };
 
                       addPacket({
-                        id: `result_${result.toolCallId}`,
+                        id: 'result_' + result.toolCallId,
                         type: '工具',
                         method: 'POST',
-                        endpoint: `/invoke/${result.toolName}`,
+                        endpoint: '/invoke/' + result.toolName,
                         status: result.status === 'success' ? 200 : 500,
-                        time: `${result.latency || 0}ms`,
+                        time: String(result.latency || 0) + 'ms',
                         payload: result.args,
                         response: result.result,
                       });
@@ -1073,7 +1120,7 @@ export default function NexusChat({
                     setLocalMessages(prev => [...prev, {
                       id: Math.random().toString(36).substring(7),
                       role: 'assistant',
-                      content: `错误: ${event.error}`,
+                      content: '错误: ' + event.error,
                     }]);
                     break;
 
@@ -1198,7 +1245,7 @@ export default function NexusChat({
         setLocalMessages(prev => [...prev, {
           id: Math.random().toString(36).substring(7),
           role: 'assistant',
-          content: `请求出错：${detail}\n\n请确认服务端已配置 DASHSCOPE_API_KEY、DASHSCOPE_BASE_URL，并确保 LantuConnect-Backend 服务正在运行。`
+          content: '请求出错：' + detail + '\\n\\n请确认服务端已配置 DASHSCOPE_API_KEY、DASHSCOPE_BASE_URL，并确保 LantuConnect-Backend 服务正在运行。',
         }]);
       } finally {
         finalizeLastThinkingStep();
@@ -1214,6 +1261,7 @@ export default function NexusChat({
             currentThinkingLog,
             currentThinkingDurationsMs,
             undefined,
+            currentToolInvocations,
             modelForThisTurn,
           );
           if (!ok) {
@@ -1244,18 +1292,16 @@ export default function NexusChat({
       saveMessageToDB,
       addPacket,
       updateContext,
-      toast,
       resolvedModelValue,
       bumpConversationList,
     ],
   );
-
   const handleCopyAssistant = useCallback(async (text: string) => {
     try {
       await navigator.clipboard.writeText(text);
       toast.success('已复制');
     } catch {
-      toast.error('复制失败');
+      toast.error('澶嶅埗澶辫触');
     }
   }, []);
 
@@ -1380,6 +1426,7 @@ export default function NexusChat({
         undefined,
         undefined,
         undefined,
+        undefined,
         resolvedModelValue,
       );
     }
@@ -1400,7 +1447,7 @@ export default function NexusChat({
   };
 
   /**
-   * 首包 SSE 前已插入助手占位 + 思维链占位；仅当没有当前流式助手 id 时兜底显示底部「正在思考」。
+   * 棣栧寘 SSE 鍓嶅凡鎻掑叆鍔╂墜鍗犱綅 + 鎬濈淮閾惧崰浣嶏紱浠呭綋娌℃湁褰撳墠娴佸紡鍔╂墜 id 鏃跺厹搴曟樉绀哄簳閮ㄣ€屾鍦ㄦ€濊€冦€嶃€?
    */
   const showTypingIndicator =
     isLoading &&
@@ -1408,7 +1455,7 @@ export default function NexusChat({
       (m) => m.role === 'assistant' && m.id === streamingAssistantId,
     );
 
-  /** 含 auth 未就绪：避免未登录占位与会话恢复提示同时出现 */
+  /** 鍚?auth 鏈氨缁細閬垮厤鏈櫥褰曞崰浣嶄笌浼氳瘽鎭㈠鎻愮ず鍚屾椂鍑虹幇 */
   const shellLoading =
     !isReady ||
     !persistHydrated ||
@@ -1442,8 +1489,8 @@ export default function NexusChat({
           aria-pressed={thinkingModeEnabled}
           title={
             thinkingModeEnabled
-              ? '思考模式已开：会展示推理过程，响应更慢'
-              : '点击开启思考模式（展示推理，响应更慢）'
+              ? '思考模式已开启：会展示推理过程，响应更慢'
+              : '点击开启思考模式（展示推理过程，响应更慢）'
           }
           className={cn(
             'flex h-10 shrink-0 items-center gap-1 rounded-full px-2 text-xs font-medium transition-colors sm:px-2.5',
@@ -1464,8 +1511,8 @@ export default function NexusChat({
           aria-pressed={Boolean(selectedSkill)}
           title={
             selectedSkill
-              ? `当前技能：${selectedSkill.name}（点击更换）`
-              : '技能商城：选择后作为对话工具入口'
+              ? '当前技能：' + selectedSkill.name + '（点击更换）'
+              : '技能商店：选择后作为对话工具入口'
           }
           className={cn(
             'flex h-10 shrink-0 items-center gap-1 rounded-full px-2 text-xs font-medium transition-colors sm:px-2.5',
@@ -1538,7 +1585,7 @@ export default function NexusChat({
               type="button"
               onClick={onOpenSidebar}
               className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg text-muted-foreground transition-colors hover:bg-black/[0.06] dark:hover:bg-white/10"
-              aria-label="打开边栏"
+              aria-label="打开侧边栏"
             >
               <PanelLeft size={20} />
             </button>
@@ -1574,7 +1621,7 @@ export default function NexusChat({
             <div className="flex w-full max-w-3xl flex-col items-center gap-8">
               <div className="text-center">
                 <h2 className="text-[1.65rem] font-normal leading-snug tracking-tight text-foreground sm:text-3xl">
-                  你今天在想些什么？
+                  你今天在想什么？
                 </h2>
                 <p className="mt-3 max-w-md text-sm text-muted-foreground">
                   向 Nexus 提问、调用远程能力或与 MCP 工具协作。
@@ -1596,7 +1643,7 @@ export default function NexusChat({
                 msg.role === 'assistant' &&
                 isLoading &&
                 msg.id === streamingAssistantId;
-              /** 流式生成中不展示复制/重新生成，等本条助手回复结束后再显示 */
+              /** 娴佸紡鐢熸垚涓笉灞曠ず澶嶅埗/閲嶆柊鐢熸垚锛岀瓑鏈潯鍔╂墜鍥炲缁撴潫鍚庡啀鏄剧ず */
               const showAssistantActions =
                 msg.role === 'assistant' && !isThisAssistantStreaming;
 

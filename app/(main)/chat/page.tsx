@@ -10,19 +10,15 @@ import { MOBILE_BREAKPOINT } from '@/hooks/use-mobile';
 
 export default function ChatPage() {
   /**
-   * true = 移动端侧栏收起 / 桌面端窄条。
-   * 默认 true：移动端首屏即收起（避免 false 时整屏抽屉盖住主内容）。
-   * 挂载后若视口 ≥ md，再展开为桌面常规侧栏宽度。
+   * true = 移动端侧栏收起 / 桌面端窄栏。
+   * 默认 true：移动端首屏即收起，避免 false 时整屏抽屉盖住主内容。
+   * 挂载后若视口 >= md，再展开为桌面常规侧栏宽度。
    */
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(true);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(() => {
+    if (typeof window === 'undefined') return true;
+    return window.innerWidth < MOBILE_BREAKPOINT;
+  });
   const { openRegister } = useAuth();
-
-  useEffect(() => {
-    if (typeof window === 'undefined') return;
-    if (window.innerWidth >= MOBILE_BREAKPOINT) {
-      setSidebarCollapsed(false);
-    }
-  }, []);
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
@@ -50,7 +46,7 @@ export default function ChatPage() {
     }
   }, []);
 
-  /** 关键布局 inline 后备：CSS chunk 未及时加载时仍保持横向分栏，避免整页像无样式 HTML 垂直堆叠 */
+  /** 关键布局 inline 兜底：CSS chunk 未及时加载时仍保持横向分栏，避免整页像无样式 HTML 垂直堆叠 */
   const shellStyle = {
     display: 'flex',
     flexDirection: 'row' as const,
@@ -61,8 +57,11 @@ export default function ChatPage() {
   };
 
   return (
-    <div className="flex h-[100dvh] min-h-0 w-full overflow-hidden bg-gpt-main" style={shellStyle}>
-      {/* 移动端抽屉打开时的遮罩；md 及以上由 md:hidden 隐藏 */}
+    <div
+      className="flex h-[100dvh] min-h-0 w-full overflow-hidden bg-gpt-main"
+      style={shellStyle}
+    >
+      {/* 移动端抽屉打开时的遮罩，md 及以上由 md:hidden 隐藏 */}
       <button
         type="button"
         aria-label="关闭侧边栏"
