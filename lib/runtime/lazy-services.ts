@@ -1,7 +1,7 @@
 import type { CacheService } from '@/lib/cache/redis';
 import type { EmbeddingService } from '@/lib/vector/embedding';
 import type { LantuClient } from '@/lib/lantu-client';
-import type { VectorService } from '@/lib/vector/milvus';
+import type { VectorService } from '@/lib/vector/qdrant';
 
 export async function getLantuClient(): Promise<LantuClient> {
   const mod = await import('@/lib/lantu-client');
@@ -14,7 +14,7 @@ export async function getVectorServices(): Promise<{
 }> {
   const [embeddingModule, vectorModule] = await Promise.all([
     import('@/lib/vector/embedding'),
-    import('@/lib/vector/milvus'),
+    import('@/lib/vector/qdrant'),
   ]);
 
   return {
