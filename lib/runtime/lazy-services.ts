@@ -2,10 +2,12 @@ import type { CacheService } from '@/lib/cache/redis';
 import type { EmbeddingService } from '@/lib/vector/embedding';
 import type { LantuClient } from '@/lib/lantu-client';
 import type { VectorService } from '@/lib/vector/qdrant';
+import { systemSettingsService } from '@/lib/services/system-settings.service';
 
 export async function getLantuClient(): Promise<LantuClient> {
+  await systemSettingsService.applyRuntimeEnv();
   const mod = await import('@/lib/lantu-client');
-  return mod.lantuClient;
+  return new mod.LantuClient();
 }
 
 export async function getVectorServices(): Promise<{

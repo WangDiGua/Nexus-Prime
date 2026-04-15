@@ -1,6 +1,11 @@
+import { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/db/prisma';
 import { getAuthUser } from '@/lib/auth/auth-service';
-import { Prisma } from '@prisma/client';
+import {
+  invalidateChatCache,
+  readChatCache,
+  writeChatCache,
+} from '@/lib/cache/chat-data';
 
 export interface CreateConversationData {
   title?: string;
@@ -52,9 +57,62 @@ export interface ConversationWithMessages {
   }>;
 }
 
+type ConversationListResult = {
+  conversations: ConversationWithMessages[];
+  total: number;
+};
+
 function toJson(value: Record<string, unknown> | undefined): Prisma.InputJsonValue | undefined {
   if (!value) return undefined;
   return JSON.parse(JSON.stringify(value)) as Prisma.InputJsonValue;
+}
+
+function normalizeConversation<T extends ConversationWithMessages | null>(conversation: T): T {
+  if (!conversation) {
+    return conversation;
+  }
+
+  const normalized = {
+    ...conversation,
+    createdAt: new Date(conversation.createdAt),
+    updatedAt: new Date(conversation.updatedAt),
+    lastMessageAt: conversation.lastMessageAt ? new Date(conversation.lastMessageAt) : null,
+    messages: conversation.messages?.map((message) => ({
+      ...message,
+      createdAt: new Date(message.createdAt),
+      toolInvocations: message.toolInvocations.map((toolInvocation) => ({
+        ...toolInvocation,
+        createdAt: new Date(toolInvocation.createdAt),
+      })),
+    })),
+  } satisfies ConversationWithMessages;
+
+  return normalized as T;
+}
+
+function normalizeConversationListResult(result: ConversationListResult): ConversationListResult {
+  return {
+    total: result.total,
+    conversations: result.conversations.map((conversation) =>
+      normalizeConversation(conversation),
+    ),
+  };
+}
+
+function listCacheKey(userId: string, limit: number, offset: number): string {
+  return `conversations:user:${userId}:limit:${limit}:offset:${offset}`;
+}
+
+function detailCacheKey(userId: string, conversationId: string): string {
+  return `conversation:user:${userId}:id:${conversationId}`;
+}
+
+async function invalidateConversationCache(userId: string, conversationId?: string) {
+  await invalidateChatCache(`conversations:user:${userId}:*`);
+  if (conversationId) {
+    await invalidateChatCache(`conversation:user:${userId}:id:${conversationId}`);
+    await invalidateChatCache(`messages:user:${userId}:conversation:${conversationId}:*`);
+  }
 }
 
 export class ConversationService {
@@ -63,21 +121,32 @@ export class ConversationService {
     if (!user) throw new Error('Unauthorized');
 
     const now = new Date();
-    return prisma.conversation.create({
+    const conversation = await prisma.conversation.create({
       data: {
         userId: user.userId,
         title: data.title,
         summary: data.summary,
         metadata: toJson(data.metadata) || {},
-        /** 与 createdAt 对齐，避免 lastMessageAt 为 null 时在列表排序中沉到底部 */
         lastMessageAt: now,
       },
     });
+
+    await invalidateConversationCache(user.userId, conversation.id);
+    return conversation;
   }
 
   async findById(id: string, includeMessages: boolean = false) {
     const user = await getAuthUser();
     if (!user) throw new Error('Unauthorized');
+
+    if (!includeMessages) {
+      const cached = await readChatCache<ConversationWithMessages | null>(
+        detailCacheKey(user.userId, id),
+      );
+      if (cached) {
+        return normalizeConversation(cached);
+      }
+    }
 
     const conversation = await prisma.conversation.findFirst({
       where: { id, userId: user.userId },
@@ -118,7 +187,13 @@ export class ConversationService {
         : undefined,
     });
 
-    return conversation as ConversationWithMessages | null;
+    const typedConversation = conversation as ConversationWithMessages | null;
+
+    if (typedConversation && !includeMessages) {
+      await writeChatCache(detailCacheKey(user.userId, id), typedConversation);
+    }
+
+    return normalizeConversation(typedConversation);
   }
 
   async findByUserId(options?: { limit?: number; offset?: number }) {
@@ -127,6 +202,12 @@ export class ConversationService {
 
     const limit = options?.limit || 50;
     const offset = options?.offset || 0;
+    const key = listCacheKey(user.userId, limit, offset);
+
+    const cached = await readChatCache<ConversationListResult>(key);
+    if (cached) {
+      return normalizeConversationListResult(cached);
+    }
 
     const [conversations, total] = await Promise.all([
       prisma.conversation.findMany({
@@ -140,14 +221,19 @@ export class ConversationService {
       }),
     ]);
 
-    /** lastMessageAt 为 null 的旧数据在部分库上排序会沉底，用 createdAt 兜底 */
     const sorted = [...conversations].sort((a, b) => {
       const ta = a.lastMessageAt?.getTime() ?? a.createdAt.getTime();
       const tb = b.lastMessageAt?.getTime() ?? b.createdAt.getTime();
       return tb - ta;
     });
 
-    return { conversations: sorted, total };
+    const result: ConversationListResult = {
+      conversations: sorted as ConversationWithMessages[],
+      total,
+    };
+
+    await writeChatCache(key, result);
+    return result;
   }
 
   async update(id: string, data: UpdateConversationData) {
@@ -160,7 +246,7 @@ export class ConversationService {
 
     if (!existing) throw new Error('Conversation not found');
 
-    return prisma.conversation.update({
+    const conversation = await prisma.conversation.update({
       where: { id },
       data: {
         title: data.title,
@@ -168,6 +254,9 @@ export class ConversationService {
         metadata: toJson(data.metadata),
       },
     });
+
+    await invalidateConversationCache(user.userId, id);
+    return conversation;
   }
 
   async delete(id: string) {
@@ -184,10 +273,14 @@ export class ConversationService {
       where: { id },
     });
 
+    await invalidateConversationCache(user.userId, id);
     return { success: true };
   }
 
   async updateMessageCount(id: string) {
+    const user = await getAuthUser();
+    if (!user) throw new Error('Unauthorized');
+
     const result = await prisma.message.aggregate({
       where: { conversationId: id },
       _count: { id: true },
@@ -210,16 +303,22 @@ export class ConversationService {
         lastMessageAt: new Date(),
       },
     });
+
+    await invalidateConversationCache(user.userId, id);
   }
 
   async generateTitle(id: string, firstMessage: string) {
+    const user = await getAuthUser();
+    if (!user) throw new Error('Unauthorized');
+
     const title = firstMessage.slice(0, 50) + (firstMessage.length > 50 ? '...' : '');
-    
+
     await prisma.conversation.update({
       where: { id },
       data: { title },
     });
 
+    await invalidateConversationCache(user.userId, id);
     return title;
   }
 

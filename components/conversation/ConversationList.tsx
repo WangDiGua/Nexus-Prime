@@ -47,6 +47,9 @@ export default function ConversationList({
   searchQueryRef.current = searchQuery;
 
   const conversationListNonce = useConversationStore((s) => s.conversationListNonce);
+  const bootstrappedConversations = useConversationStore((s) => s.conversations);
+  const bootstrapReady = useConversationStore((s) => s.bootstrapReady);
+  const setConversationSnapshot = useConversationStore((s) => s.setConversations);
 
   const fetchConversations = async (query?: string) => {
     try {
@@ -73,12 +76,37 @@ export default function ConversationList({
       setIsLoading(false);
       return;
     }
-    void fetchConversations(searchQueryRef.current);
-  }, [authenticated, conversationListNonce]);
+    const currentQuery = searchQueryRef.current.trim();
+    if (!currentQuery && bootstrapReady && conversationListNonce === 0) {
+      setConversations(bootstrappedConversations);
+      setIsLoading(false);
+      return;
+    }
+    void fetchConversations(currentQuery);
+  }, [authenticated, bootstrapReady, bootstrappedConversations, conversationListNonce]);
 
-  const handleSearch = async (query: string) => {
+  useEffect(() => {
+    if (!authenticated) return;
+    const currentQuery = searchQueryRef.current.trim();
+    if (!currentQuery) {
+      if (bootstrapReady && conversationListNonce === 0) {
+        setConversations(bootstrappedConversations);
+        setIsLoading(false);
+        return;
+      }
+      if (conversationListNonce > 0) {
+        void fetchConversations('');
+      }
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      void fetchConversations(currentQuery);
+    }, 300);
+    return () => window.clearTimeout(timer);
+  }, [authenticated, bootstrapReady, bootstrappedConversations, searchQuery]);
+
+  const handleSearch = (query: string) => {
     setSearchQuery(query);
-    await fetchConversations(query);
   };
 
   const handleDelete = async (id: string) => {
@@ -87,7 +115,11 @@ export default function ConversationList({
         method: 'DELETE',
       });
       if (response.ok) {
-        setConversations((prev) => prev.filter((c) => c.id !== id));
+        const nextConversations = conversations.filter((c) => c.id !== id);
+        setConversations(nextConversations);
+        setConversationSnapshot(
+          bootstrappedConversations.filter((conversation) => conversation.id !== id),
+        );
         if (activeConversationId === id) {
           onNewConversation();
         }

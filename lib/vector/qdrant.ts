@@ -1,5 +1,8 @@
-const globalForQdrant = globalThis as unknown as {
-  qdrantInitPromise: Promise<void> | undefined;
+import { vectorConfig } from '@/lib/vector/config';
+
+const globalForVector = globalThis as unknown as {
+  vectorInitPromise: Promise<void> | undefined;
+  skipWriteNoticeShown: boolean | undefined;
 };
 
 export interface MessageVector {
@@ -13,154 +16,183 @@ export interface MessageVector {
   createdAt: number;
 }
 
-export const COLLECTION_NAME = 'conversation_messages';
-export const VECTOR_DIMENSION = parseInt(process.env.VECTOR_DIMENSION || '1536', 10);
+export const COLLECTION_NAME = vectorConfig.collectionName;
+export const VECTOR_DIMENSION = parseInt(
+  process.env.NDEA_EMBEDDING_DIMENSION || process.env.VECTOR_DIMENSION || '1024',
+  10
+);
 
-function getQdrantBaseUrl(): string {
-  return (
-    process.env.QDRANT_URL ||
-    process.env.QDRANT_ADDRESS ||
-    'http://localhost:6333'
-  ).replace(/\/+$/, '');
+function getMilvusHeaders(): HeadersInit {
+  if (!vectorConfig.milvusToken) {
+    return {
+      'Content-Type': 'application/json',
+    };
+  }
+
+  return {
+    'Content-Type': 'application/json',
+    Authorization: `Bearer ${vectorConfig.milvusToken}`,
+  };
 }
 
-function getQdrantHeaders(): HeadersInit {
-  const apiKey = process.env.QDRANT_API_KEY || process.env.QDRANT_TOKEN || '';
-  return apiKey
-    ? {
-        'Content-Type': 'application/json',
-        'api-key': apiKey,
-      }
-    : {
-        'Content-Type': 'application/json',
-      };
-}
-
-async function qdrantRequest<T>(
+async function milvusRequest<T extends { code?: number; message?: string }>(
   path: string,
-  init?: RequestInit,
+  init: RequestInit
 ): Promise<T> {
-  const response = await fetch(`${getQdrantBaseUrl()}${path}`, {
+  const response = await fetch(`${vectorConfig.milvusBaseUrl}${path}`, {
     ...init,
     headers: {
-      ...getQdrantHeaders(),
-      ...(init?.headers || {}),
+      ...getMilvusHeaders(),
+      ...(init.headers || {}),
     },
     cache: 'no-store',
   });
 
   if (!response.ok) {
     const text = await response.text().catch(() => '');
-    throw new Error(`Qdrant ${response.status}: ${text || response.statusText}`);
+    throw new Error(`Milvus ${response.status}: ${text || response.statusText}`);
   }
 
-  return (await response.json()) as T;
-}
-
-async function collectionExists(): Promise<boolean> {
-  const response = await fetch(
-    `${getQdrantBaseUrl()}/collections/${COLLECTION_NAME}`,
-    {
-      headers: getQdrantHeaders(),
-      cache: 'no-store',
-    },
-  );
-
-  if (response.status === 404) {
-    return false;
+  const payload = (await response.json()) as T;
+  if (typeof payload.code === 'number' && payload.code !== 0) {
+    throw new Error(
+      `Milvus request failed (${payload.code}): ${payload.message || 'Unknown error'}`
+    );
   }
 
-  if (!response.ok) {
-    const text = await response.text().catch(() => '');
-    throw new Error(`Qdrant ${response.status}: ${text || response.statusText}`);
-  }
-
-  return true;
+  return payload;
 }
 
 export async function initVectorCollection(): Promise<void> {
-  if (!globalForQdrant.qdrantInitPromise) {
-    globalForQdrant.qdrantInitPromise = (async () => {
-      const exists = await collectionExists();
-      if (!exists) {
-        await qdrantRequest(`/collections/${COLLECTION_NAME}`, {
-          method: 'PUT',
-          body: JSON.stringify({
-            vectors: {
-              size: VECTOR_DIMENSION,
-              distance: 'Cosine',
-            },
-          }),
-        });
-        console.log('[Qdrant] Collection created:', COLLECTION_NAME);
+  if (!globalForVector.vectorInitPromise) {
+    globalForVector.vectorInitPromise = (async () => {
+      const response = await milvusRequest<{
+        code?: number;
+        message?: string;
+        data?: {
+          fields?: Array<{
+            name?: string;
+          }>;
+        };
+      }>('/v2/vectordb/collections/describe', {
+        method: 'POST',
+        body: JSON.stringify({
+          dbName: vectorConfig.database,
+          collectionName: COLLECTION_NAME,
+        }),
+      });
+
+      const hasVectorField = response.data?.fields?.some(
+        (field) => field.name === vectorConfig.vectorField
+      );
+      if (!hasVectorField) {
+        throw new Error(
+          `Milvus collection ${vectorConfig.database}.${COLLECTION_NAME} does not contain vector field ${vectorConfig.vectorField}`
+        );
       }
     })().catch((error) => {
-      globalForQdrant.qdrantInitPromise = undefined;
+      globalForVector.vectorInitPromise = undefined;
       throw error;
     });
   }
 
-  await globalForQdrant.qdrantInitPromise;
+  await globalForVector.vectorInitPromise;
 }
 
-function toPointPayload(data: MessageVector) {
-  return {
-    id: data.id,
-    vector: data.embedding,
-    payload: {
-      userId: data.userId,
-      conversationId: data.conversationId,
-      messageId: data.messageId,
-      role: data.role,
-      content: data.content,
-      createdAt: data.createdAt,
-    },
-  };
+function logSkipWriteOnce(): void {
+  if (globalForVector.skipWriteNoticeShown) return;
+  globalForVector.skipWriteNoticeShown = true;
+  console.info(
+    `[Milvus] Using external collection ${vectorConfig.database}.${COLLECTION_NAME}; message vector write/delete is disabled.`
+  );
 }
 
-function buildFilter(options: {
-  userId?: string;
-  conversationId?: string;
-}) {
-  const must: Array<Record<string, unknown>> = [];
+function parseMetadata(value: unknown): Record<string, unknown> {
+  if (!value) return {};
+  if (typeof value === 'string') {
+    try {
+      const parsed = JSON.parse(value);
+      return parsed && typeof parsed === 'object'
+        ? (parsed as Record<string, unknown>)
+        : {};
+    } catch {
+      return {};
+    }
+  }
+  if (typeof value === 'object') {
+    return value as Record<string, unknown>;
+  }
+  return {};
+}
 
-  if (options.userId) {
-    must.push({
-      key: 'userId',
-      match: { value: options.userId },
-    });
+function normalizeText(value: unknown): string {
+  return typeof value === 'string' ? value.trim() : '';
+}
+
+function tokenizeKeywordQuery(query: string): string[] {
+  const normalized = query.trim().toLowerCase();
+  if (!normalized) return [];
+
+  const splitTerms = normalized
+    .split(/[\s,.;|/]+/)
+    .map((item) => item.trim())
+    .filter((item) => item.length >= 2);
+
+  return [...new Set([normalized, ...splitTerms])];
+}
+
+function scoreKeywordMatch(
+  query: string,
+  content: string,
+  metadata: Record<string, unknown>
+): number {
+  const haystack = [
+    content,
+    normalizeText(metadata.title),
+    normalizeText(metadata.source),
+    normalizeText(metadata.assetType),
+    normalizeText(metadata.table_name),
+    normalizeText(metadata.table_comment),
+    normalizeText(metadata.question),
+  ]
+    .join(' ')
+    .toLowerCase();
+
+  if (!haystack) return 0;
+
+  const keywords = tokenizeKeywordQuery(query);
+  if (keywords.length === 0) return 0;
+
+  let matched = 0;
+  for (const keyword of keywords) {
+    if (haystack.includes(keyword)) {
+      matched += 1;
+    }
   }
 
-  if (options.conversationId) {
-    must.push({
-      key: 'conversationId',
-      match: { value: options.conversationId },
-    });
+  let score = matched / keywords.length;
+  if (haystack.includes(query.trim().toLowerCase())) {
+    score += vectorConfig.hybridExactMatchBoost;
   }
 
-  return must.length > 0 ? { must } : undefined;
+  return Math.min(score, 1 + vectorConfig.hybridExactMatchBoost);
 }
+
+type SearchHit = {
+  id: string;
+  messageId: string;
+  score: number;
+  content: string;
+  metadata: Record<string, unknown>;
+};
 
 export class VectorService {
-  async insertVector(data: MessageVector): Promise<void> {
-    await initVectorCollection();
-    await qdrantRequest(`/collections/${COLLECTION_NAME}/points?wait=true`, {
-      method: 'PUT',
-      body: JSON.stringify({
-        points: [toPointPayload(data)],
-      }),
-    });
+  async insertVector(_data: MessageVector): Promise<void> {
+    logSkipWriteOnce();
   }
 
-  async insertVectors(data: MessageVector[]): Promise<void> {
-    if (data.length === 0) return;
-    await initVectorCollection();
-    await qdrantRequest(`/collections/${COLLECTION_NAME}/points?wait=true`, {
-      method: 'PUT',
-      body: JSON.stringify({
-        points: data.map(toPointPayload),
-      }),
-    });
+  async insertVectors(_data: MessageVector[]): Promise<void> {
+    logSkipWriteOnce();
   }
 
   async searchSimilar(
@@ -170,115 +202,99 @@ export class VectorService {
       conversationId?: string;
       topK?: number;
       threshold?: number;
-    } = {},
-  ): Promise<
-    Array<{
-      id: string;
-      messageId: string;
-      score: number;
-      content: string;
-      metadata: Record<string, unknown>;
-    }>
-  > {
+      queryText?: string;
+    } = {}
+  ): Promise<SearchHit[]> {
     await initVectorCollection();
-    const { userId, conversationId, topK = 10, threshold } = options;
-    const response = await qdrantRequest<{
-      result?: Array<{
-        id: string;
-        score: number;
-        payload?: Record<string, unknown>;
+    const { topK = vectorConfig.searchLimit, threshold, queryText = '' } = options;
+    const limit = vectorConfig.hybridEnabled
+      ? Math.max(topK, vectorConfig.hybridOverfetchLimit)
+      : topK;
+
+    const response = await milvusRequest<{
+      code?: number;
+      message?: string;
+      data?: Array<{
+        asset_id?: string;
+        asset_type?: string;
+        distance?: number;
+        title?: string;
+        text?: string;
+        source?: string;
+        metadata?: unknown;
+        messageId?: string;
       }>;
-    }>(`/collections/${COLLECTION_NAME}/points/search`, {
+    }>('/v2/vectordb/entities/search', {
       method: 'POST',
       body: JSON.stringify({
-        vector: embedding,
-        limit: topK,
-        filter: buildFilter({ userId, conversationId }),
-        with_payload: true,
-        score_threshold: threshold,
+        dbName: vectorConfig.database,
+        collectionName: COLLECTION_NAME,
+        data: [embedding],
+        annsField: vectorConfig.vectorField,
+        limit,
+        outputFields: ['asset_id', 'asset_type', 'title', 'text', 'source', 'metadata'],
       }),
     });
 
-    return (response.result || []).map((item) => ({
-      id: String(item.id),
-      messageId: String(item.payload?.messageId || ''),
-      score: item.score,
-      content: String(item.payload?.content || ''),
-      metadata: {
-        userId: item.payload?.userId,
-        conversationId: item.payload?.conversationId,
-        role: item.payload?.role,
-        createdAt: item.payload?.createdAt,
-      },
-    }));
+    const hits = (response.data || [])
+      .map((item) => {
+        const metadata = parseMetadata(item.metadata);
+        const content = normalizeText(item.text) || normalizeText(item.title);
+        return {
+          id: String(item.asset_id || ''),
+          messageId: normalizeText(item.messageId) || normalizeText(metadata.messageId),
+          score: Number(item.distance || 0),
+          content,
+          metadata: {
+            ...metadata,
+            assetId: String(item.asset_id || ''),
+            assetType: normalizeText(item.asset_type),
+            title: normalizeText(item.title),
+            source: normalizeText(item.source),
+          },
+        } satisfies SearchHit;
+      })
+      .filter((item) => item.id && item.content)
+      .filter((item) => (threshold == null ? true : item.score >= threshold));
+
+    if (!vectorConfig.hybridEnabled || !queryText.trim()) {
+      return hits.slice(0, topK);
+    }
+
+    return hits
+      .map((item) => {
+        const keywordScore = scoreKeywordMatch(
+          queryText,
+          item.content,
+          item.metadata
+        );
+        return {
+          ...item,
+          score:
+            item.score * vectorConfig.hybridVectorWeight +
+            keywordScore * vectorConfig.hybridKeywordWeight,
+        };
+      })
+      .sort((a, b) => b.score - a.score)
+      .slice(0, topK);
   }
 
-  async deleteByMessageId(messageId: string): Promise<void> {
-    await initVectorCollection();
-    await qdrantRequest(`/collections/${COLLECTION_NAME}/points/delete?wait=true`, {
-      method: 'POST',
-      body: JSON.stringify({
-        filter: {
-          must: [
-            {
-              key: 'messageId',
-              match: { value: messageId },
-            },
-          ],
-        },
-      }),
-    });
+  async deleteByMessageId(_messageId: string): Promise<void> {
+    logSkipWriteOnce();
   }
 
-  async deleteByConversationId(conversationId: string): Promise<void> {
-    await initVectorCollection();
-    await qdrantRequest(`/collections/${COLLECTION_NAME}/points/delete?wait=true`, {
-      method: 'POST',
-      body: JSON.stringify({
-        filter: {
-          must: [
-            {
-              key: 'conversationId',
-              match: { value: conversationId },
-            },
-          ],
-        },
-      }),
-    });
+  async deleteByConversationId(_conversationId: string): Promise<void> {
+    logSkipWriteOnce();
   }
 
-  async deleteByUserId(userId: string): Promise<void> {
-    await initVectorCollection();
-    await qdrantRequest(`/collections/${COLLECTION_NAME}/points/delete?wait=true`, {
-      method: 'POST',
-      body: JSON.stringify({
-        filter: {
-          must: [
-            {
-              key: 'userId',
-              match: { value: userId },
-            },
-          ],
-        },
-      }),
-    });
+  async deleteByUserId(_userId: string): Promise<void> {
+    logSkipWriteOnce();
   }
 
   async getStats(): Promise<{ total: number }> {
     await initVectorCollection();
-    const response = await qdrantRequest<{
-      result?: {
-        count?: number;
-      };
-    }>(`/collections/${COLLECTION_NAME}/points/count`, {
-      method: 'POST',
-      body: JSON.stringify({
-        exact: true,
-      }),
-    });
-
     return {
-      total: Number(response.result?.count || 0),
+      total: 0,
     };
   }
 }

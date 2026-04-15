@@ -38,7 +38,8 @@ import { useAuth } from '@/components/auth/auth-provider';
 import { toast } from '@/lib/toast';
 import { useRegistryStore } from '@/hooks/use-registry-store';
 import { useConversationStore } from '@/hooks/use-conversation-store';
-import type { Message as StoredMessage } from '@/hooks/use-conversation-store';
+import type { Conversation as ConversationListItem } from '@/hooks/use-conversation-store';
+import type { User, UserSettings } from '@/types/user';
 import type {
   ChatSSEEvent,
   ToolCall,
@@ -54,6 +55,8 @@ import type { Skill } from '@/types/registry';
 export interface NexusChatProps {
   sidebarCollapsed?: boolean;
   onOpenSidebar?: () => void;
+  activeConversationId: string | null;
+  onSelectConversation: (conversationId: string | null) => void;
 }
 
 interface Message {
@@ -62,15 +65,39 @@ interface Message {
   content: string;
   toolInvocations?: ToolInvocationView[];
   thinkingLog?: string[];
-  /** 涓?thinkingLog 绛夐暱锛屾瘡姝ヨ€楁椂锛堟绉掞級 */
+  /** Matches `thinkingLog`; each entry is the duration of that thinking step in ms. */
   thinkingStepDurationsMs?: number[];
 }
 
-const ASK_DATA_SKILL_ID =
+interface BootstrapMessage {
+  id: string;
+  conversationId?: string;
+  role: 'USER' | 'ASSISTANT' | 'SYSTEM';
+  content: string;
+  toolResults?: unknown;
+  toolInvocations?: unknown;
+  thinkingLog?: Record<string, unknown> | string[] | null;
+  thinkingStepDurationsMs?: unknown;
+}
+
+interface BootstrapResponse {
+  user: User | null;
+  settings: UserSettings | null;
+  conversations: ConversationListItem[];
+  activeConversation: ConversationListItem | null;
+  messages: BootstrapMessage[];
+  systemConfig?: {
+    askDataSkillId: string;
+    askDataDirectEnabled: boolean;
+    askDataButtonLabel: string;
+  };
+}
+
+const FALLBACK_ASK_DATA_SKILL_ID =
   process.env.NEXT_PUBLIC_NEXUS_ASK_DATA_SKILL_ID?.trim() || '';
-const ASK_DATA_DIRECT_ENABLED =
+const FALLBACK_ASK_DATA_DIRECT_ENABLED =
   process.env.NEXT_PUBLIC_NEXUS_ASK_DATA_ENABLED === 'true';
-const ASK_DATA_BUTTON_LABEL =
+const FALLBACK_ASK_DATA_BUTTON_LABEL =
   process.env.NEXT_PUBLIC_NEXUS_ASK_DATA_BUTTON_LABEL?.trim() || '智能问数';
 const ASK_DATA_DIRECT_ENTRY_ID = 'ask-data-direct-entry';
 const ASK_DATA_DIRECT_ENTRY_TYPE = 'ask_data';
@@ -127,41 +154,19 @@ function normalizeToolInvocations(
   return normalized.length > 0 ? normalized : undefined;
 }
 
-/** 灏嗘湇鍔＄/ store 娑堟伅杞负 NexusChat 鏈湴 Message */
-function mapStoredToLocalMessage(m: StoredMessage): Message {
+function mapApiMessageToLocalMessage(m: BootstrapMessage): Message {
   return {
     id: m.id,
     role: m.role.toLowerCase() as 'user' | 'assistant' | 'system',
     content: m.content,
-    thinkingLog: m.thinkingLog || undefined,
+    thinkingLog: Array.isArray(m.thinkingLog)
+      ? m.thinkingLog.map((item) => String(item))
+      : m.thinkingLog && typeof m.thinkingLog === 'object'
+        ? Object.values(m.thinkingLog).map((item) => String(item))
+        : undefined,
     thinkingStepDurationsMs: parseThinkingStepDurations(m.thinkingStepDurationsMs),
-    toolInvocations: normalizeToolInvocations(m.toolResults),
+    toolInvocations: normalizeToolInvocations(m.toolResults ?? m.toolInvocations),
   };
-}
-
-/** 鏈湴娑堟伅 鈫?store 褰㈡€侊紝渚?localStorage 缂撳瓨锛坈reatedAt 鐢ㄥ崰浣嶏紝閬垮厤闃叉姈搴忓垪鍖栨姈鍔級 */
-function localMessagesToStored(
-  conversationId: string,
-  local: Message[],
-): StoredMessage[] {
-  return local.map((m, i) => ({
-    id: m.id,
-    conversationId,
-    role:
-      m.role === 'assistant'
-        ? 'ASSISTANT'
-        : m.role === 'system'
-          ? 'SYSTEM'
-          : 'USER',
-    content: m.content,
-    toolCalls: null,
-    toolResults: m.toolInvocations ?? null,
-    thinkingLog: m.thinkingLog ?? null,
-    thinkingStepDurationsMs: m.thinkingStepDurationsMs ?? null,
-    tokensUsed: 0,
-    latencyMs: 0,
-    createdAt: new Date(1000 + i),
-  }));
 }
 
 function primitiveArrayEqual(
@@ -251,9 +256,9 @@ function ThinkingTrace({
   stepDurationsMs?: number[];
   isLoading: boolean;
 }) {
-  /** 鍔犺浇缁撴潫鍚庡彲鎵嬪姩灞曞紑锛涘姞杞戒腑寮哄埗灞曞紑 */
+  /** Keep expanded while streaming; collapse control is only available after completion. */
   const [expandedAfterDone, setExpandedAfterDone] = useState(false);
-  /** 宸插畬鎴愭楠わ細榛樿鍗曡鏀惰捣锛岀偣鍑诲睍寮€鍏ㄦ枃 */
+  /** Completed steps default to one line and can be expanded individually. */
   const [expandedSteps, setExpandedSteps] = useState<Record<number, boolean>>({});
   const [liveLastMs, setLiveLastMs] = useState(0);
   const lastStepStartRef = useRef(0);
@@ -511,7 +516,7 @@ function ThinkingTrace({
   );
 }
 
-/** 鏈紑鎬濊€冩ā寮忔椂锛氶鍖呭墠鍦ㄥ乏渚ф樉绀轰笁鐐癸紝閬垮厤绌虹櫧鍍忓崱姝?*/
+/** While waiting for the first streamed token, show lightweight loading dots. */
 function AssistantStreamDots() {
   return (
     <div
@@ -528,7 +533,7 @@ function AssistantStreamDots() {
   );
 }
 
-/** 浼氳瘽鍖轰笌杈撳叆鏉￠鏋讹細閬垮厤銆屾仮澶嶄細璇濄€嶄笌銆岃鐧诲綍銆嶆枃妗堝悓鏃跺嚭鐜?*/
+/** Shared shell skeleton for bootstrap/loading states. */
 function ChatShellSkeleton() {
   return (
     <div className="flex min-h-0 flex-1 flex-col" aria-busy="true" aria-label="加载中">
@@ -912,51 +917,28 @@ const ChatMessageRow = React.memo(function ChatMessageRow({
 export default function NexusChat({
   sidebarCollapsed = false,
   onOpenSidebar,
+  activeConversationId,
+  onSelectConversation,
 }: NexusChatProps) {
-  const { isAuthenticated, isReady, openLogin } = useAuth();
+  const {
+    isAuthenticated,
+    isReady,
+    sessionNonce,
+    applyBootstrapUser,
+    openLogin,
+  } = useAuth();
   const canChat = isReady && isAuthenticated;
   const { addPacket, updateContext, config, updateConfig } = useRegistryStore();
-  const {
-    activeConversationId,
-    messages: storedMessages,
-    setMessages: setStoredMessages,
-    setActiveConversation,
-    bumpConversationList,
-  } = useConversationStore();
-  
+  const { bumpConversationList, setConversations } = useConversationStore();
+
   const [localMessages, setLocalMessages] = useState<Message[]>([]);
   const [input, setInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [abortController, setAbortController] = useState<AbortController | null>(null);
-  /**
-   * 蹇呴』涓?SSR 棣栧睆涓€鑷达細涓嶅彲鍦?useState 鍒濆鍊奸噷璇?hasHydrated()锛?
-   * 鍚﹀垯瀹㈡埛绔甯у彲鑳藉凡涓?true锛屾湇鍔＄濮嬬粓涓?false锛岃Е鍙?hydration mismatch銆?
-   */
-  const [persistHydrated, setPersistHydrated] = useState(false);
-  /** 姝ｅ湪浠庢湇鍔＄鎷夊彇褰撳墠浼氳瘽娑堟伅锛堝埛鏂板悗锛?*/
-  const [messagesRestoring, setMessagesRestoring] = useState(false);
+  const [bootstrapLoading, setBootstrapLoading] = useState(true);
 
   const scrollRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    if (useConversationStore.persist.hasHydrated()) {
-      setPersistHydrated(true);
-    }
-    const unsub = useConversationStore.persist.onFinishHydration(() => {
-      setPersistHydrated(true);
-    });
-    return unsub;
-  }, []);
-
-  useEffect(() => {
-    if (!isReady || !isAuthenticated) return;
-    fetch('/api/settings')
-      .then((r) => (r.ok ? r.json() : null))
-      .then((s) => {
-        if (s?.defaultModel) updateConfig({ model: s.defaultModel });
-      })
-      .catch(() => {});
-  }, [isAuthenticated, isReady, updateConfig]);
+  const skipBootstrapConversationIdRef = useRef<string | null>(null);
 
   const handleModelChange = async (value: string) => {
     updateConfig({ model: value });
@@ -987,70 +969,31 @@ export default function NexusChat({
     return known ? normalized! : chatModelOptions[0]?.value ?? '';
   }, [chatModelOptions, config.model]);
 
-  /** 褰撳墠杩欐璇锋眰瀵瑰簲鐨勫姪鎵嬫秷鎭?id锛堥鍖?SSE 鍓嶅凡鎻掑叆鍗犱綅锛岄伩鍏嶈鐢ㄣ€屼笂涓€鏉″姪鎵嬨€嶏級 */
+  /** Assistant placeholder id for the in-flight request. */
   const [streamingAssistantId, setStreamingAssistantId] = useState<string | null>(
     null,
   );
 
-  /** 鏄惁鍚戠櫨鐐艰姹傛€濊€冮摼锛坮easoning锛夛紱鎸佷箙鍖栧埌 localStorage */
   const [thinkingModeEnabled, setThinkingModeEnabled] = useState(false);
-  useEffect(() => {
-    try {
-      if (window.localStorage.getItem('nexus-prime:thinking-mode') === 'true') {
-        setThinkingModeEnabled(true);
-      }
-    } catch {
-      /* ignore */
-    }
-  }, []);
-  useEffect(() => {
-    try {
-      window.localStorage.setItem(
-        'nexus-prime:thinking-mode',
-        thinkingModeEnabled ? 'true' : 'false'
-      );
-    } catch {
-      /* ignore */
-    }
-  }, [thinkingModeEnabled]);
 
-  /** 閫変腑鐨勬妧鑳戒綔涓?chat 鍏ュ彛璧勬簮锛坋ntryResource锛夛紝褰卞搷鑱氬悎宸ュ叿鍒楄〃 */
   const [selectedSkill, setSelectedSkill] = useState<ChatSelectedSkill | null>(
     null,
   );
+  const [publicSystemConfig, setPublicSystemConfig] = useState(() => ({
+    askDataSkillId: FALLBACK_ASK_DATA_SKILL_ID,
+    askDataDirectEnabled: FALLBACK_ASK_DATA_DIRECT_ENABLED,
+    askDataButtonLabel: FALLBACK_ASK_DATA_BUTTON_LABEL,
+  }));
   const [skillSheetOpen, setSkillSheetOpen] = useState(false);
   const [availableSkills, setAvailableSkills] = useState<Skill[]>([]);
-  useEffect(() => {
-    try {
-      const raw = window.localStorage.getItem('nexus-prime:chat-entry-skill');
-      if (!raw) return;
-      const parsed = JSON.parse(raw) as ChatSelectedSkill;
-      if (parsed?.id && typeof parsed.name === 'string') {
-        setSelectedSkill(parsed);
-      }
-    } catch {
-      /* ignore */
-    }
-  }, []);
-  useEffect(() => {
-    try {
-      if (selectedSkill) {
-        window.localStorage.setItem(
-          'nexus-prime:chat-entry-skill',
-          JSON.stringify(selectedSkill),
-        );
-      } else {
-        window.localStorage.removeItem('nexus-prime:chat-entry-skill');
-      }
-    } catch {
-      /* ignore */
-    }
-  }, [selectedSkill]);
 
   useEffect(() => {
     const shouldLoadSkills =
       skillSheetOpen ||
-      Boolean(ASK_DATA_SKILL_ID && !ASK_DATA_DIRECT_ENABLED) ||
+      Boolean(
+        publicSystemConfig.askDataSkillId &&
+          !publicSystemConfig.askDataDirectEnabled,
+      ) ||
       Boolean(
         selectedSkill &&
           selectedSkill.entryResourceType !== ASK_DATA_DIRECT_ENTRY_TYPE,
@@ -1079,175 +1022,125 @@ export default function NexusChat({
     return () => {
       cancelled = true;
     };
-  }, [selectedSkill, skillSheetOpen]);
+  }, [publicSystemConfig, selectedSkill, skillSheetOpen]);
 
-  const prevActiveConversationId = useRef<string | null>(activeConversationId);
-  /** 浠呯敤浜庢仮澶嶆媺鍙栵細棣栧抚涓?null锛屼究浜庡湪銆屽埛鏂?/ 棣栨杩涘叆甯?id銆嶆椂涓庡綋鍓?id 姣旇緝涓哄凡鍙樺寲锛屼粠鑰屽繀瀹氳姹傛湇鍔＄ */
-  const restorePrevConversationIdRef = useRef<string | null>(null);
-  const localMessagesRef = useRef<Message[]>([]);
-  localMessagesRef.current = localMessages;
   const deferredMessages = useDeferredValue(localMessages);
   const askDataShortcutSkill = useMemo<ChatSelectedSkill | null>(() => {
-    if (ASK_DATA_DIRECT_ENABLED) {
+    if (publicSystemConfig.askDataDirectEnabled) {
       return {
         id: ASK_DATA_DIRECT_ENTRY_ID,
-        name: ASK_DATA_BUTTON_LABEL,
+        name: publicSystemConfig.askDataButtonLabel,
         entryResourceType: ASK_DATA_DIRECT_ENTRY_TYPE,
         entryResourceId: 'portal',
       };
     }
-    if (!ASK_DATA_SKILL_ID) {
+    if (!publicSystemConfig.askDataSkillId) {
       return null;
     }
-    const matched = availableSkills.find((skill) => skill.id === ASK_DATA_SKILL_ID);
+    const matched = availableSkills.find(
+      (skill) => skill.id === publicSystemConfig.askDataSkillId,
+    );
     if (!matched) {
       return null;
     }
     return {
-      id: ASK_DATA_SKILL_ID,
+      id: publicSystemConfig.askDataSkillId,
       name: matched.name,
       icon: matched.icon,
       entryResourceType: 'skill',
-      entryResourceId: ASK_DATA_SKILL_ID,
+      entryResourceId: publicSystemConfig.askDataSkillId,
     };
-  }, [availableSkills]);
-
-  /** 鏈嶅姟绔?鎸佷箙鍖?store 鏇存柊鏃跺悓姝ュ埌鏈湴锛涗笌鏈湴鎸囩汗涓€鑷村垯璺宠繃锛岄伩鍏嶄笌銆屾湰鍦扳啋store 闃叉姈銆嶄簰鐩告墦鏋?*/
-  useEffect(() => {
-    if (storedMessages.length === 0) return;
-    const fromStored = storedMessages.map(mapStoredToLocalMessage);
-    if (messagesEqual(fromStored, localMessagesRef.current)) {
-      return;
-    }
-    setLocalMessages(fromStored);
-  }, [storedMessages]);
-
-  const lastPersistedMessagesRef = useRef<Message[]>([]);
-
-  /** 鏈湴瀵硅瘽 鈫?zustand persist锛坙ocalStorage锛夛紝瀹炵幇娴忚鍣ㄤ晶缂撳瓨锛屼緵鍒锋柊鍚庡厛灞曠ず鍐嶄笌 DB 瀵归綈 */
-  useEffect(() => {
-    if (!activeConversationId || !persistHydrated) return;
-
-    const t = window.setTimeout(() => {
-      if (messagesEqual(localMessages, lastPersistedMessagesRef.current)) return;
-      lastPersistedMessagesRef.current = localMessages;
-      setStoredMessages(
-        localMessagesToStored(activeConversationId, localMessages),
-      );
-    }, 350);
-    return () => window.clearTimeout(t);
-  }, [localMessages, activeConversationId, persistHydrated, setStoredMessages]);
+  }, [availableSkills, publicSystemConfig]);
 
   /**
-   * 绫荤紦瀛樼瓥鐣ワ細persist 閲峢ydrate 鍚庤嫢鏈変笌褰撳墠浼氳瘽 id 涓€鑷寸殑鏈湴 messages锛屽厛鐩存帴灞曠ず锛堟祻瑙堝櫒涓€绾х紦瀛橈級锛?
-   * 鍚屾椂鍚庡彴璇锋眰鏁版嵁搴撳苟浠ユ湇鍔＄缁撴灉涓哄噯瑕嗙洊锛涙棤鏈湴缂撳瓨鏃舵墠鏄剧ず銆屾仮澶嶄腑銆嶃€?
-   * 鍚屼竴浼氳瘽涓旀鍦ㄦ祦寮忔椂涓嶆媺鍙栵紝閬垮厤瑕嗙洊涔愯 UI銆?
-   * 鍒囧嬁灏?isLoading 鍒楀叆渚濊禆锛氭祦寮忕粨鏉?isLoading鈫抐alse 浼氬啀娆¤窇鏈?effect 骞惰姹?API锛?
-   * 鑻ヨ姹傛棭浜庡姪鎵嬫秷鎭惤搴撴垨涓?DB 绔炴€侊紝浼氱敤涓嶅畬鏁村垪琛ㄨ鐩?localMessages锛屽鑷淬€屽洖澶嶅悗鍐呭娑堝け銆嶃€?
+   * Bootstrap is the only source for first-load conversation hydration.
+   * Keep the effect keyed to the URL conversation id so refreshes always come
+   * from the server instead of any browser-side cache.
    */
   useEffect(() => {
-    if (!canChat || !activeConversationId) {
-      restorePrevConversationIdRef.current = activeConversationId;
+    if (
+      skipBootstrapConversationIdRef.current !== null &&
+      skipBootstrapConversationIdRef.current === activeConversationId
+    ) {
+      skipBootstrapConversationIdRef.current = null;
       return;
     }
-    if (!persistHydrated) {
-      return;
-    }
-
-    const prev = restorePrevConversationIdRef.current;
-    const conversationChanged = prev !== activeConversationId;
-
-    if (!conversationChanged && isLoading) {
-      return;
-    }
-
-    /**
-     * 棣栨潯娑堟伅浼氬厛 setIsLoading(true)锛屽啀 POST 鍒涘缓浼氳瘽骞?setActiveConversation(null鈫抜d)銆?
-     * 姝ゆ椂鑻ユ寜銆屼細璇濆垏鎹€嶆竻绌哄苟鎷夊彇锛屼細鎶规帀涔愯鎻掑叆鐨勭敤鎴?鍔╂墜鍗犱綅銆?
-     */
-    if (conversationChanged && prev === null && isLoading) {
-      restorePrevConversationIdRef.current = activeConversationId;
-      return;
-    }
-
-    restorePrevConversationIdRef.current = activeConversationId;
-
-    /** 浠呬細璇?A鈫払 鍒囨崲鏃舵竻绌猴紱鍒锋柊(null鈫抜d) 淇濈暀宸查噸hydrate 鐨勬湰鍦扮紦瀛?*/
-    const switchedConversation =
-      conversationChanged &&
-      prev !== null &&
-      prev !== activeConversationId;
-    if (switchedConversation) {
-      setStoredMessages([]);
-      setLocalMessages([]);
-    }
-
-    const msgs = useConversationStore.getState().messages;
-    const hasBrowserCache =
-      msgs.length > 0 &&
-      msgs.every((m) => m.conversationId === activeConversationId);
 
     let cancelled = false;
-    if (!hasBrowserCache) {
-      setMessagesRestoring(true);
-    }
+    setBootstrapLoading(true);
     void (async () => {
       try {
-        const response = await fetch('/api/conversations/' + activeConversationId + '?messages=true');
-        if (!response.ok || cancelled) return;
-        const conversation = await response.json();
+        const params = new URLSearchParams();
+        if (activeConversationId) {
+          params.set('conversationId', activeConversationId);
+        }
+        const query = params.toString();
+        const response = await fetch(
+          query ? `/api/chat/bootstrap?${query}` : '/api/chat/bootstrap',
+          { cache: 'no-store' },
+        );
+        if (!response.ok) {
+          throw new Error(`bootstrap ${response.status}`);
+        }
+
+        const data = (await response.json()) as BootstrapResponse;
         if (cancelled) return;
 
-        const raw = Array.isArray(conversation.messages)
-          ? conversation.messages
-          : [];
-        const mapped: StoredMessage[] = raw.map((m: Record<string, unknown>) => ({
-          id: m.id as string,
-          conversationId: (m.conversationId as string) ?? activeConversationId,
-          role: m.role as 'USER' | 'ASSISTANT' | 'SYSTEM',
-          content: m.content as string,
-          toolCalls: (m.toolCalls as Record<string, unknown> | null) ?? null,
-          toolResults:
-            (m.toolResults as unknown) ??
-            (m.toolInvocations as unknown) ??
-            null,
-          thinkingLog: m.thinkingLog
-            ? Object.values(m.thinkingLog as Record<string, unknown>)
-            : null,
-          thinkingStepDurationsMs: parseThinkingStepDurations(
-            m.thinkingStepDurationsMs,
-          ),
-          tokensUsed: (m.tokensUsed as number) ?? 0,
-          latencyMs: (m.latencyMs as number) ?? 0,
-          createdAt: new Date(m.createdAt as string),
-        }));
+        if (data.systemConfig) {
+          setPublicSystemConfig({
+            askDataSkillId:
+              data.systemConfig.askDataSkillId ?? FALLBACK_ASK_DATA_SKILL_ID,
+            askDataDirectEnabled:
+              data.systemConfig.askDataDirectEnabled ??
+              FALLBACK_ASK_DATA_DIRECT_ENABLED,
+            askDataButtonLabel:
+              data.systemConfig.askDataButtonLabel ??
+              FALLBACK_ASK_DATA_BUTTON_LABEL,
+          });
+        }
+        applyBootstrapUser(data.user);
+        setConversations(data.conversations || []);
+        if (data.settings?.defaultModel) {
+          updateConfig({ model: data.settings.defaultModel });
+        }
 
-        setStoredMessages(mapped);
-        setLocalMessages(mapped.map(mapStoredToLocalMessage));
-      } catch (e) {
-        console.error('[NexusChat] restore conversation failed', e);
+        if (activeConversationId && !data.activeConversation) {
+          setLocalMessages([]);
+          onSelectConversation(null);
+          return;
+        }
+
+        setLocalMessages((data.messages || []).map(mapApiMessageToLocalMessage));
+      } catch (error) {
+        console.error('[NexusChat] bootstrap failed', error);
+        if (!cancelled) {
+          setLocalMessages([]);
+          setConversations([]);
+          setPublicSystemConfig({
+            askDataSkillId: FALLBACK_ASK_DATA_SKILL_ID,
+            askDataDirectEnabled: FALLBACK_ASK_DATA_DIRECT_ENABLED,
+            askDataButtonLabel: FALLBACK_ASK_DATA_BUTTON_LABEL,
+          });
+          applyBootstrapUser(null);
+        }
       } finally {
         if (!cancelled) {
-          setMessagesRestoring(false);
+          setBootstrapLoading(false);
         }
       }
     })();
 
     return () => {
       cancelled = true;
-      setMessagesRestoring(false);
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- isLoading 涓嶅垪鍏ワ紝閬垮厤娴佸紡缁撴潫鍚庨噸澶嶆媺 API 瑕嗙洊鐣岄潰
-  }, [canChat, activeConversationId, setStoredMessages, persistHydrated]);
-
-  /** 浠呭湪銆屾柊寤轰細璇濄€嶄粠鏈?id 鈫?null 鏃舵竻绌烘湰鍦版秷鎭?*/
-  useEffect(() => {
-    const prev = prevActiveConversationId.current;
-    if (prev !== null && activeConversationId === null) {
-      setLocalMessages([]);
-    }
-    prevActiveConversationId.current = activeConversationId;
-  }, [activeConversationId]);
+  }, [
+    activeConversationId,
+    applyBootstrapUser,
+    onSelectConversation,
+    sessionNonce,
+    setConversations,
+    updateConfig,
+  ]);
 
   useEffect(() => {
     if (scrollRef.current) {
@@ -1263,7 +1156,7 @@ export default function NexusChat({
     thinkingStepDurationsMs?: number[],
     tokensUsed?: number,
     toolResults?: unknown,
-    /** 褰撳墠杞浣跨敤鐨勬ā鍨?id锛堜笌澶撮儴 ModelSelect / 鏈嶅姟绔?chat 涓€鑷达級 */
+    /** Model used for this turn; persisted with the saved message. */
     model?: string
   ) => {
     try {
@@ -1320,7 +1213,7 @@ export default function NexusChat({
       conversationId: string | null;
       controller: AbortController;
       enableThinking: boolean;
-      /** 鏈€夋妧鑳芥椂鐢辨湇鍔＄浣跨敤榛樿 entry锛坅pi-config锛?*/
+      /** When no skill is selected, the server falls back to the configured default entry. */
       entrySkill: ChatSelectedSkill | null;
     }) => {
       const {
@@ -1332,10 +1225,10 @@ export default function NexusChat({
         entrySkill,
       } = params;
 
-      /** 鏈紑鍚€屾€濊€冦€嶆椂涓嶅睍绀?涓嶈惤搴?ReAct 鎬濈淮閾撅紙浠嶈蛋宸ュ叿璋冪敤涓庢鏂囨祦锛?*/
+      /** Collect reasoning steps for UI only when thinking mode is enabled. */
       const collectThinkingUi = enableThinking;
 
-      /** 鏈疆璇锋眰瀵瑰簲鐨勬ā鍨嬶紙涓庡ご閮ㄩ€夋嫨鍣ㄤ竴鑷达紝渚涜惤搴擄級 */
+      /** Keep the message model aligned with the current header selector. */
       const modelForThisTurn = resolvedModelValue;
 
       let currentContent = '';
@@ -1343,7 +1236,7 @@ export default function NexusChat({
       let currentThinkingLog: string[] = [];
       let currentThinkingDurationsMs: number[] = [];
       let thinkingStepStartedAt = Date.now();
-      /** 鏄惁澶勪簬鍚屼竴杞€屾ā鍨嬫€濊€冦€嶆祦寮忕墖娈典腑锛坮easoning_delta锛?*/
+      /** Tracks whether we are still appending the current reasoning chunk. */
       let reasoningDeltaOpen = false;
       let pendingUiFlush = false;
       let animationFrameId: number | null = null;
@@ -1807,7 +1700,8 @@ export default function NexusChat({
         if (createResponse.ok) {
           const conversation = await createResponse.json();
           currentConversationId = conversation.id;
-          setActiveConversation(currentConversationId);
+          skipBootstrapConversationIdRef.current = currentConversationId;
+          onSelectConversation(currentConversationId);
           bumpConversationList();
         }
       } catch (error) {
@@ -1844,7 +1738,8 @@ export default function NexusChat({
   };
 
   /**
-   * 棣栧寘 SSE 鍓嶅凡鎻掑叆鍔╂墜鍗犱綅 + 鎬濈淮閾惧崰浣嶏紱浠呭綋娌℃湁褰撳墠娴佸紡鍔╂墜 id 鏃跺厹搴曟樉绀哄簳閮ㄣ€屾鍦ㄦ€濊€冦€嶃€?
+   * The streaming assistant placeholder is inserted before SSE chunks arrive.
+   * Only show the bottom typing dots if that placeholder is still missing.
    */
   const showTypingIndicator =
     isLoading &&
@@ -1852,11 +1747,8 @@ export default function NexusChat({
       (m) => m.role === 'assistant' && m.id === streamingAssistantId,
     );
 
-  /** 鍚?auth 鏈氨缁細閬垮厤鏈櫥褰曞崰浣嶄笌浼氳瘽鎭㈠鎻愮ず鍚屾椂鍑虹幇 */
-  const shellLoading =
-    !isReady ||
-    !persistHydrated ||
-    (Boolean(activeConversationId) && messagesRestoring);
+  /** Use bootstrap as the only first-load gate for the chat shell. */
+  const shellLoading = bootstrapLoading || !isReady;
 
   return (
     <main className="relative flex h-full min-h-0 flex-col overflow-hidden bg-gpt-main text-foreground safe-area-pt">

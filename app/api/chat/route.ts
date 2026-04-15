@@ -1,13 +1,11 @@
 import { NextRequest } from 'next/server';
 import { createToolExecutor } from '@/lib/tool-executor';
-import { createApiConfig } from '@/lib/api-config';
 import { ChatSSEEvent, ToolCall, ToolResult } from '@/types/chat';
 import { settingsService } from '@/lib/services/settings.service';
 import { messageService } from '@/lib/services/message.service';
+import { systemSettingsService } from '@/lib/services/system-settings.service';
 import { getCaches, getLantuClient, getVectorServices } from '@/lib/runtime/lazy-services';
 import { getAuthUser } from '@/lib/auth/auth-service';
-
-const apiConfig = createApiConfig();
 
 const DASHSCOPE_BASE_URL = process.env.DASHSCOPE_BASE_URL?.replace(/\/$/, '');
 const DASHSCOPE_API_KEY = process.env.DASHSCOPE_API_KEY;
@@ -506,6 +504,8 @@ export async function POST(req: NextRequest) {
     typeof body.enableThinking === 'boolean'
       ? body.enableThinking
       : process.env.DASHSCOPE_ENABLE_THINKING === 'true';
+  const { reactMaxIterations } =
+    await systemSettingsService.getChatRuntimeSettings();
 
   (async () => {
     try {
@@ -716,7 +716,7 @@ The user explicitly entered 智能问数 mode.
       }
 
       let iteration = 0;
-      const maxIterations = apiConfig.react.maxIterations;
+      const maxIterations = reactMaxIterations;
 
       await writer.write(
         encoder.encode(encodeSSE({

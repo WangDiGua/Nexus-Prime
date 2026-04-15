@@ -1,6 +1,5 @@
 import type { Metadata, Viewport } from 'next';
 import { cookies, headers } from 'next/headers';
-import { Inter, JetBrains_Mono } from 'next/font/google';
 import Script from 'next/script';
 import './globals.css';
 import { Providers } from '@/components/Providers';
@@ -11,13 +10,6 @@ import {
   themeClassFromClientHint,
   themeClassFromCookie,
 } from '@/lib/theme-resolve';
-
-const inter = Inter({ subsets: ['latin'], variable: '--font-sans' });
-
-const jetbrainsMono = JetBrains_Mono({
-  subsets: ['latin'],
-  variable: '--font-mono',
-});
 
 export const metadata: Metadata = {
   title: 'Nexus-Prime',
@@ -51,7 +43,7 @@ export default async function RootLayout({
   return (
     <html
       lang="zh-CN"
-      className={cn(jetbrainsMono.variable, inter.variable, themeClass)}
+      className={cn(themeClass)}
       suppressHydrationWarning
     >
       <body className="antialiased" suppressHydrationWarning>

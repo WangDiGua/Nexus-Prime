@@ -1,7 +1,12 @@
+import { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/db/prisma';
 import { getAuthUser } from '@/lib/auth/auth-service';
-import { Prisma } from '@prisma/client';
 import { getVectorServices } from '@/lib/runtime/lazy-services';
+import {
+  invalidateChatCache,
+  readChatCache,
+  writeChatCache,
+} from '@/lib/cache/chat-data';
 
 export interface CreateMessageData {
   conversationId: string;
@@ -49,7 +54,6 @@ function toJson(value: unknown): Prisma.InputJsonValue | undefined {
   return JSON.parse(JSON.stringify(value)) as Prisma.InputJsonValue;
 }
 
-/** Accepts object or array from JSON body; strips non-JSON-safe values. */
 function toPrismaJsonField(value: unknown): Prisma.InputJsonValue | undefined {
   if (value == null) return undefined;
   try {
@@ -59,12 +63,31 @@ function toPrismaJsonField(value: unknown): Prisma.InputJsonValue | undefined {
   }
 }
 
-function normalizeMessageRole(
-  role: unknown
-): 'USER' | 'ASSISTANT' | 'SYSTEM' {
-  const r = String(role ?? '').toUpperCase();
-  if (r === 'USER' || r === 'ASSISTANT' || r === 'SYSTEM') return r;
+function normalizeMessageRole(role: unknown): 'USER' | 'ASSISTANT' | 'SYSTEM' {
+  const raw = String(role ?? '').toUpperCase();
+  if (raw === 'USER' || raw === 'ASSISTANT' || raw === 'SYSTEM') {
+    return raw;
+  }
   return 'ASSISTANT';
+}
+
+function messagesCacheKey(userId: string, conversationId: string, limit: number, offset: number) {
+  return `messages:user:${userId}:conversation:${conversationId}:limit:${limit}:offset:${offset}`;
+}
+
+function normalizeMessages(messages: MessageWithInvocations[]): MessageWithInvocations[] {
+  return messages.map((message) => ({
+    ...message,
+    createdAt: new Date(message.createdAt),
+    toolInvocations: message.toolInvocations.map((toolInvocation) => ({
+      ...toolInvocation,
+      createdAt: new Date(toolInvocation.createdAt),
+    })),
+  }));
+}
+
+async function invalidateMessageCache(userId: string, conversationId: string) {
+  await invalidateChatCache(`messages:user:${userId}:conversation:${conversationId}:*`);
 }
 
 export class MessageService {
@@ -82,9 +105,7 @@ export class MessageService {
         toolCalls: toJson(data.toolCalls),
         toolResults: toJson(data.toolResults),
         thinkingLog: toPrismaJsonField(data.thinkingLog),
-        thinkingStepDurationsMs: toPrismaJsonField(
-          data.thinkingStepDurationsMs
-        ),
+        thinkingStepDurationsMs: toPrismaJsonField(data.thinkingStepDurationsMs),
         tokensUsed: data.tokensUsed || 0,
         latencyMs: data.latencyMs || 0,
         model: data.model,
@@ -93,6 +114,8 @@ export class MessageService {
         toolInvocations: true,
       },
     });
+
+    await invalidateMessageCache(user.userId, data.conversationId);
 
     if (data.storeVector !== false && data.content.trim()) {
       try {
@@ -118,15 +141,33 @@ export class MessageService {
 
   async findByConversationId(
     conversationId: string,
-    options?: { limit?: number; offset?: number }
+    options?: { limit?: number; offset?: number },
   ) {
     const user = await getAuthUser();
     if (!user) throw new Error('Unauthorized');
 
+    const conversation = await prisma.conversation.findFirst({
+      where: {
+        id: conversationId,
+        userId: user.userId,
+      },
+      select: { id: true },
+    });
+
+    if (!conversation) {
+      throw new Error('Conversation not found');
+    }
+
     const limit = options?.limit || 100;
     const offset = options?.offset || 0;
+    const key = messagesCacheKey(user.userId, conversationId, limit, offset);
 
-    const messages = await prisma.message.findMany({
+    const cached = await readChatCache<MessageWithInvocations[]>(key);
+    if (cached) {
+      return normalizeMessages(cached);
+    }
+
+    const messages = (await prisma.message.findMany({
       where: { conversationId },
       orderBy: { createdAt: 'asc' },
       take: limit,
@@ -136,9 +177,10 @@ export class MessageService {
           orderBy: { createdAt: 'asc' },
         },
       },
-    });
+    })) as MessageWithInvocations[];
 
-    return messages as MessageWithInvocations[];
+    await writeChatCache(key, messages);
+    return normalizeMessages(messages);
   }
 
   async findById(id: string) {
@@ -146,7 +188,12 @@ export class MessageService {
     if (!user) throw new Error('Unauthorized');
 
     const message = await prisma.message.findFirst({
-      where: { id },
+      where: {
+        id,
+        conversation: {
+          userId: user.userId,
+        },
+      },
       include: {
         toolInvocations: true,
       },
@@ -159,10 +206,17 @@ export class MessageService {
     const user = await getAuthUser();
     if (!user) throw new Error('Unauthorized');
 
-    const existing = await prisma.message.findFirst({ where: { id } });
+    const existing = await prisma.message.findFirst({
+      where: {
+        id,
+        conversation: {
+          userId: user.userId,
+        },
+      },
+    });
     if (!existing) throw new Error('Message not found');
 
-    return prisma.message.update({
+    const message = await prisma.message.update({
       where: { id },
       data: {
         content: data.content,
@@ -176,17 +230,28 @@ export class MessageService {
         latencyMs: data.latencyMs,
       },
     });
+
+    await invalidateMessageCache(user.userId, existing.conversationId);
+    return message;
   }
 
   async delete(id: string) {
     const user = await getAuthUser();
     if (!user) throw new Error('Unauthorized');
 
-    const existing = await prisma.message.findFirst({ where: { id } });
+    const existing = await prisma.message.findFirst({
+      where: {
+        id,
+        conversation: {
+          userId: user.userId,
+        },
+      },
+    });
     if (!existing) throw new Error('Message not found');
 
     await prisma.message.delete({ where: { id } });
-    
+    await invalidateMessageCache(user.userId, existing.conversationId);
+
     try {
       const { vectorService } = await getVectorServices();
       await vectorService.deleteByMessageId(id);
@@ -233,7 +298,7 @@ export class MessageService {
       errorMessage?: string;
       latencyMs?: number;
       cached?: boolean;
-    }
+    },
   ) {
     return prisma.toolInvocation.update({
       where: { id },
@@ -249,7 +314,7 @@ export class MessageService {
 
   async getConversationContext(
     conversationId: string,
-    limit: number = 10
+    limit: number = 10,
   ): Promise<Array<{ role: string; content: string }>> {
     const messages = await prisma.message.findMany({
       where: { conversationId },
@@ -261,9 +326,9 @@ export class MessageService {
       },
     });
 
-    return messages.reverse().map((m) => ({
-      role: m.role.toLowerCase(),
-      content: m.content,
+    return messages.reverse().map((message) => ({
+      role: message.role.toLowerCase(),
+      content: message.content,
     }));
   }
 }

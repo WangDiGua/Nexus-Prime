@@ -54,6 +54,8 @@
 }
 
 :root {
+    --font-sans: "Segoe UI", "PingFang SC", "Microsoft YaHei", system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+    --font-mono: "JetBrains Mono", "Cascadia Code", "SFMono-Regular", Consolas, "Liberation Mono", monospace;
     /* ChatGPT light: canvas + sidebar */
     --gpt-sidebar: #f9f9f9;
     --gpt-main: #ffffff;

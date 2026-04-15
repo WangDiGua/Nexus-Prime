@@ -153,9 +153,6 @@ export class AuthService {
   async getCurrentUser(userId: string) {
     const user = await prisma.user.findUnique({
       where: { id: userId },
-      include: {
-        userSettings: true,
-      },
     });
 
     if (!user) {
@@ -169,7 +166,10 @@ export class AuthService {
       displayName: user.displayName,
       avatarUrl: user.avatarUrl,
       role: user.role,
-      settings: user.userSettings,
+      status: user.status,
+      createdAt: user.createdAt,
+      updatedAt: user.updatedAt,
+      lastLoginAt: user.lastLoginAt,
     };
   }
 

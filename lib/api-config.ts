@@ -1,6 +1,7 @@
 /**
- * 门户侧配置：连接项与 `lantuconnect-sdk` 的 `createLantuConnectConfigFromEnv` 使用同一组 `LANTU_API_*`。
- * 此处保留的是 **Nexus 业务**（ReAct 轮数、入口资源、聚合结果字段别名等），不属于 SDK 职责。
+ * Portal-side config shared with `lantuconnect-sdk`.
+ * This file keeps Nexus-specific runtime fields such as ReAct iteration limits
+ * and aggregated response-field mappings.
  */
 export interface ApiConfig {
   baseUrl: string;
@@ -9,7 +10,7 @@ export interface ApiConfig {
     apiKey: string;
     trace: string;
   };
-  /** HTTP 客户端超时（毫秒），与 `LANTU_API_TIMEOUT_MS` 一致 */
+  /** HTTP client timeout in milliseconds. */
   timeout: {
     api: number;
   };
@@ -74,7 +75,12 @@ export function createApiConfig(): ApiConfig {
       upstreamName: process.env.LANTU_FIELD_UPSTREAM_NAME || 'upstreamToolName',
     },
     react: {
-      maxIterations: parseInt(process.env.LANTU_REACT_MAX_ITERATIONS || '20', 10),
+      maxIterations: parseInt(
+        process.env.LANTU_REACT_MAX_ITERATIONS ||
+          process.env.REACT_MAX_ITERATIONS ||
+          '20',
+        10,
+      ),
     },
     entryResource: {
       type: process.env.LANTU_ENTRY_RESOURCE_TYPE || 'agent',

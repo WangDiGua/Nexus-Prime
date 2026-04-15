@@ -142,6 +142,26 @@ enum Theme {
   SYSTEM
 }
 
+model SystemSetting {
+  id          String           @id @default(uuid()) @db.VarChar(36)
+  key         String           @unique @map("setting_key") @db.VarChar(100)
+  value       String?          @map("setting_value") @db.Text
+  valueType   SettingValueType @default(STRING) @map("value_type")
+  isSecret    Boolean          @default(false) @map("is_secret")
+  description String?          @db.VarChar(255)
+  createdAt   DateTime         @default(now()) @map("created_at")
+  updatedAt   DateTime         @updatedAt @map("updated_at")
+
+  @@map("system_settings")
+}
+
+enum SettingValueType {
+  STRING
+  NUMBER
+  BOOLEAN
+  JSON
+}
+
 model UserApiKey {
   id          String   @id @default(uuid()) @db.VarChar(36)
   userId      String   @map("user_id") @db.VarChar(36)

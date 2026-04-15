@@ -10,6 +10,7 @@ import {
   useState,
   type ReactNode,
 } from 'react';
+import { usePathname } from 'next/navigation';
 import type { User } from '@/types/user';
 import {
   sessionPayloadToUser,
@@ -22,7 +23,9 @@ type AuthContextValue = {
   user: User | null;
   isAuthenticated: boolean;
   isReady: boolean;
+  sessionNonce: number;
   refresh: () => Promise<void>;
+  applyBootstrapUser: (user: User | null) => void;
   openLogin: () => void;
   closeLogin: () => void;
   loginOpen: boolean;
@@ -36,8 +39,10 @@ const AuthContext = createContext<AuthContextValue | null>(null);
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
   const [ready, setReady] = useState(false);
+  const [sessionNonce, setSessionNonce] = useState(0);
   const [loginOpen, setLoginOpen] = useState(false);
   const [registerOpen, setRegisterOpen] = useState(false);
+  const pathname = usePathname();
   /** 合并并发 refresh，避免后返回的失败请求把已登录状态冲掉 */
   const refreshPromiseRef = useRef<Promise<void> | null>(null);
 
@@ -61,12 +66,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
         if (r.ok && d.success && d.user) {
           setUser(d.user);
+          setSessionNonce((value) => value + 1);
           return;
         }
 
         // 仅当服务端明确表示「未登录」时清空，避免 500/网络抖动导致来回切换
         if (r.status === 401) {
           setUser(null);
+          setSessionNonce((value) => value + 1);
           return;
         }
       } catch {
@@ -82,8 +89,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, []);
 
   useEffect(() => {
+    if (pathname?.startsWith('/chat')) {
+      return;
+    }
     void refresh();
-  }, [refresh]);
+  }, [pathname, refresh]);
+
+  const applyBootstrapUser = useCallback((nextUser: User | null) => {
+    setUser(nextUser);
+    setReady(true);
+  }, []);
 
   const openLogin = useCallback(() => setLoginOpen(true), []);
   const closeLogin = useCallback(() => setLoginOpen(false), []);
@@ -95,7 +110,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       user,
       isAuthenticated: !!user,
       isReady: ready,
+      sessionNonce,
       refresh,
+      applyBootstrapUser,
       openLogin,
       closeLogin,
       loginOpen,
@@ -106,7 +123,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     [
       user,
       ready,
+      sessionNonce,
       refresh,
+      applyBootstrapUser,
       openLogin,
       closeLogin,
       loginOpen,
@@ -124,8 +143,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         onOpenChange={setLoginOpen}
         onSuccess={(payload: AuthSessionUserPayload) => {
           setUser(sessionPayloadToUser(payload));
+          setReady(true);
+          setSessionNonce((value) => value + 1);
           setLoginOpen(false);
-          void refresh();
         }}
         onOpenRegister={() => {
           setLoginOpen(false);
@@ -137,8 +157,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         onOpenChange={setRegisterOpen}
         onSuccess={(payload: AuthSessionUserPayload) => {
           setUser(sessionPayloadToUser(payload));
+          setReady(true);
+          setSessionNonce((value) => value + 1);
           setRegisterOpen(false);
-          void refresh();
         }}
         onOpenLogin={() => {
           setRegisterOpen(false);
