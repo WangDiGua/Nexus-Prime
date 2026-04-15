@@ -5,6 +5,7 @@ import { ChatSSEEvent, ToolCall, ToolResult } from '@/types/chat';
 import { settingsService } from '@/lib/services/settings.service';
 import { messageService } from '@/lib/services/message.service';
 import { getCaches, getLantuClient, getVectorServices } from '@/lib/runtime/lazy-services';
+import { getAuthUser } from '@/lib/auth/auth-service';
 
 const apiConfig = createApiConfig();
 
@@ -270,28 +271,86 @@ async function getRelevantHistory(
   query: string,
   conversationId: string,
   limit: number = 5
-): Promise<OpenAIMessage[]> {
+): Promise<string> {
   try {
     const { embeddingService, vectorService } = await getVectorServices();
     const queryEmbedding = await embeddingService.embed(query);
-    const similarMessages = await vectorService.searchSimilar(queryEmbedding.embedding, { topK: limit });
-    
-    if (similarMessages.length === 0) return [];
-
-    const messageIds = similarMessages.map((m) => m.messageId);
-    const messages = await Promise.all(
-      messageIds.map((id) => messageService.findById(id))
+    const similarMessages = await vectorService.searchSimilar(
+      queryEmbedding.embedding,
+      { topK: limit, queryText: query }
     );
 
-    return messages
-      .filter((m) => m && m.conversationId !== conversationId)
-      .map((m) => ({
-        role: m!.role.toLowerCase() as 'user' | 'assistant',
-        content: m!.content,
-      }));
+    if (similarMessages.length === 0) return '';
+
+    const conversationBlocks: string[] = [];
+    const knowledgeBlocks: string[] = [];
+
+    for (const item of similarMessages) {
+      if (item.messageId) {
+        const message = await messageService.findById(item.messageId);
+        if (message && message.conversationId !== conversationId) {
+          conversationBlocks.push(
+            `${message.role.toLowerCase()}: ${message.content}`
+          );
+          continue;
+        }
+      }
+
+      const metadata = item.metadata || {};
+      const title =
+        typeof metadata.title === 'string' ? metadata.title.trim() : '';
+      const source =
+        typeof metadata.source === 'string' ? metadata.source.trim() : '';
+      const assetType =
+        typeof metadata.assetType === 'string' ? metadata.assetType.trim() : '';
+      const metaSummary = [
+        typeof metadata.table_name === 'string' && metadata.table_name.trim()
+          ? `表名：${metadata.table_name.trim()}`
+          : '',
+        typeof metadata.table_comment === 'string' &&
+        metadata.table_comment.trim()
+          ? `表说明：${metadata.table_comment.trim()}`
+          : '',
+        typeof metadata.question === 'string' && metadata.question.trim()
+          ? `问题：${metadata.question.trim()}`
+          : '',
+        typeof metadata.metric_id === 'string' && metadata.metric_id.trim()
+          ? `指标：${metadata.metric_id.trim()}`
+          : '',
+      ]
+        .filter(Boolean)
+        .join('；')
+        .slice(0, 400);
+
+      knowledgeBlocks.push(
+        [
+          title ? `标题：${title}` : '',
+          assetType ? `类型：${assetType}` : '',
+          source ? `来源：${source}` : '',
+          metaSummary ? `补充：${metaSummary}` : '',
+          `内容：${item.content.slice(0, 1600)}`,
+        ]
+          .filter(Boolean)
+          .join('\n')
+      );
+    }
+
+    const sections: string[] = [];
+    if (conversationBlocks.length > 0) {
+      sections.push(`[相关历史对话]\n${conversationBlocks.join('\n')}`);
+    }
+    if (knowledgeBlocks.length > 0) {
+      sections.push(
+        `[相关知识库]\n${knowledgeBlocks
+          .map((block, index) => `#${index + 1}\n${block}`)
+          .join('\n\n')}`
+      );
+    }
+
+    return sections.join('\n\n');
   } catch (error) {
     console.error('[VectorSearch] Error:', error);
-    return [];
+    return '';
   }
 }
 
@@ -437,6 +496,8 @@ export async function POST(req: NextRequest) {
     // User not authenticated or settings not found
   }
 
+  const authUser = await getAuthUser().catch(() => null);
+
   const encoder = new TextEncoder();
   const stream = new TransformStream();
   const writer = stream.writable.getWriter();
@@ -508,9 +569,20 @@ export async function POST(req: NextRequest) {
 
       const toolExecutor = await createToolExecutor(
         body.entryResourceType,
-        body.entryResourceId
+        body.entryResourceId,
+        {
+          requestContext: {
+            ...(authUser?.userId ? { actor_id: authUser.userId } : {}),
+            ...(authUser?.username ? { actor_name: authUser.username } : {}),
+            ...(authUser?.role ? { actor_role: authUser.role } : {}),
+            ...(body.conversationId ? { conversation_id: body.conversationId } : {}),
+          },
+        },
       );
       const tools = toolExecutor.getToolDefinitions();
+      const hasAskDataTool = tools.some((tool) =>
+        tool.function.name.includes('ask_data_query'),
+      );
 
       console.log(`[ReAct] 📦 获取到 ${tools.length} 个工具定义`);
 
@@ -570,7 +642,36 @@ export async function POST(req: NextRequest) {
 4. 如果工具调用失败，向用户解释情况并提供替代方案`;
 
       /** 技能层必须放在最前，否则默认「核心能力」会压过角色扮演 */
-      const systemPrompt = skillPreamble + baseSystemPrompt;
+      const askDataPriorityPrompt = hasAskDataTool
+        ? `
+
+## Data Query Priority
+
+When the user asks for campus business data, grouped statistics, rankings, trends, rosters, or identifier-based attribute lookup, prefer the ask_data_query tool.
+- Do not guess numbers, factual records, or attribute values from memory.
+- If the tool returns a table, chart, or clarification question, use that result directly.
+- For employee number, student number, roster, title, department, status, and similar point lookups, call the data tool before answering.
+`
+        : '';
+
+      const askDataModePrompt =
+        body.entryResourceType === 'ask_data'
+          ? `
+
+## Active Mode
+
+The user explicitly entered 智能问数 mode.
+- Treat this conversation as a campus data query workflow first.
+- Prefer asking the ask_data_query tool for factual data, statistics, dimensions, trends, rosters, and identifier-based lookups.
+- Keep answers grounded in tool output instead of general speculation.
+`
+          : '';
+
+      const systemPrompt =
+        skillPreamble +
+        baseSystemPrompt +
+        askDataModePrompt +
+        askDataPriorityPrompt;
 
       const conversationHistory: OpenAIMessage[] = [
         { role: 'system', content: systemPrompt },
@@ -598,11 +699,11 @@ export async function POST(req: NextRequest) {
           body.conversationId || '',
           3
         );
-        
-        if (relevantHistory.length > 0) {
+
+        if (relevantHistory) {
           conversationHistory.push({
             role: 'system',
-            content: `[相关历史上下文]\n${relevantHistory.map((m) => `${m.role}: ${m.content}`).join('\n')}`,
+            content: relevantHistory,
           });
         }
       }
@@ -741,7 +842,7 @@ export async function POST(req: NextRequest) {
             }))
           );
 
-          const cacheKey = `${toolCall.name}:${JSON.stringify(toolCall.args)}`;
+          const cacheKey = toolExecutor.buildCacheKey(toolCall);
           let result: ToolResult;
           const { toolCache } = await getCaches();
 

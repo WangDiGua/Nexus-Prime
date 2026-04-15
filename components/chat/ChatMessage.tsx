@@ -39,6 +39,89 @@ function formatToolSummary(result: unknown): string {
   return stringifyVisualizationJson(result);
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+function extractStructuredTable(value: unknown): {
+  columns: Array<{ key: string; label: string }>;
+  rows: Record<string, unknown>[];
+} | null {
+  if (!isRecord(value) || !('table' in value) || !isRecord(value.table)) {
+    return null;
+  }
+
+  const rawColumns = Array.isArray(value.table.columns) ? value.table.columns : [];
+  const rows = Array.isArray(value.table.rows)
+    ? value.table.rows.filter(isRecord)
+    : [];
+  if (rawColumns.length === 0 || rows.length === 0) {
+    return null;
+  }
+
+  const columns = rawColumns
+    .map((column) => {
+      if (typeof column === 'string') {
+        return { key: column, label: column };
+      }
+      if (isRecord(column) && typeof column.key === 'string') {
+        return {
+          key: column.key,
+          label:
+            typeof column.label === 'string' && column.label.trim().length > 0
+              ? column.label
+              : column.key,
+        };
+      }
+      return null;
+    })
+    .filter(Boolean) as Array<{ key: string; label: string }>;
+
+  return columns.length > 0 ? { columns, rows } : null;
+}
+
+function renderTableCell(value: unknown): string {
+  if (value == null) return '-';
+  if (typeof value === 'string') return value;
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value);
+  return stringifyVisualizationJson(value);
+}
+
+function ToolResultTable({
+  table,
+}: {
+  table: { columns: Array<{ key: string; label: string }>; rows: Record<string, unknown>[] };
+}) {
+  return (
+    <div className="mt-3 overflow-hidden rounded-xl border border-border/70 bg-background/70">
+      <div className="overflow-x-auto">
+        <table className="w-full border-collapse text-left text-xs">
+          <thead className="bg-muted/40 text-muted-foreground">
+            <tr>
+              {table.columns.map((column) => (
+                <th key={column.key} className="px-3 py-2 font-medium">
+                  {column.label}
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {table.rows.map((row, rowIndex) => (
+              <tr key={rowIndex} className="border-t border-border/60">
+                {table.columns.map((column) => (
+                  <td key={column.key} className="px-3 py-2 align-top text-foreground">
+                    {renderTableCell(row[column.key])}
+                  </td>
+                ))}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
 function ToolInvocationCard({
   invocation,
 }: {
@@ -47,6 +130,7 @@ function ToolInvocationCard({
   const delivery = summarizeToolInvocation(invocation);
   const result = invocation.result;
   const visualization = result ? extractVisualizationMessage(result.result) : null;
+  const structuredTable = result ? extractStructuredTable(result.result) : null;
   const toneClass =
     delivery.tone === 'success'
       ? 'border-emerald-500/20 bg-emerald-500/[0.04]'
@@ -97,6 +181,10 @@ function ToolInvocationCard({
 
       {result?.status === 'success' && visualization ? (
         <VisualizationBlock payload={result.result} />
+      ) : null}
+
+      {result?.status === 'success' && structuredTable ? (
+        <ToolResultTable table={structuredTable} />
       ) : null}
 
       {invocation.state === 'result' ? (

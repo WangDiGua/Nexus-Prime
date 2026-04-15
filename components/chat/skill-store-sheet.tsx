@@ -17,6 +17,8 @@ export interface ChatSelectedSkill {
   id: string;
   name: string;
   icon?: string;
+  entryResourceType?: string;
+  entryResourceId?: string;
 }
 
 interface SkillStoreSheetProps {
@@ -173,6 +175,8 @@ export function SkillStoreSheet({
                         id: resource.id,
                         name: title,
                         icon: resource.icon,
+                        entryResourceType: 'skill',
+                        entryResourceId: resource.id,
                       });
                       onOpenChange(false);
                     }}

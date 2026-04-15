@@ -1,6 +1,5 @@
 ﻿'use client';
 
-import dynamic from 'next/dynamic';
 import React, {
   useRef,
   useEffect,
@@ -30,10 +29,6 @@ import {
 import ChatMessage from '@/components/chat/ChatMessage';
 import { ModelSelect } from '@/components/ui/model-select';
 import {
-  getWorkModeSummary,
-  recommendSkills,
-} from '@/lib/agent-workbench';
-import {
   buildChatModelOptions,
   normalizeChatModelId,
 } from '@/lib/chat-model-options';
@@ -50,18 +45,11 @@ import type {
   ToolInvocationView,
   ToolResult,
 } from '@/types/chat';
-import type { ChatSelectedSkill } from '@/components/chat/skill-store-sheet';
+import {
+  SkillStoreSheet,
+  type ChatSelectedSkill,
+} from '@/components/chat/skill-store-sheet';
 import type { Skill } from '@/types/registry';
-
-const SkillStoreSheet = dynamic(
-  () =>
-    import('@/components/chat/skill-store-sheet').then(
-      (mod) => mod.SkillStoreSheet,
-    ),
-  {
-    ssr: false,
-  },
-);
 
 export interface NexusChatProps {
   sidebarCollapsed?: boolean;
@@ -77,6 +65,15 @@ interface Message {
   /** 涓?thinkingLog 绛夐暱锛屾瘡姝ヨ€楁椂锛堟绉掞級 */
   thinkingStepDurationsMs?: number[];
 }
+
+const ASK_DATA_SKILL_ID =
+  process.env.NEXT_PUBLIC_NEXUS_ASK_DATA_SKILL_ID?.trim() || '';
+const ASK_DATA_DIRECT_ENABLED =
+  process.env.NEXT_PUBLIC_NEXUS_ASK_DATA_ENABLED === 'true';
+const ASK_DATA_BUTTON_LABEL =
+  process.env.NEXT_PUBLIC_NEXUS_ASK_DATA_BUTTON_LABEL?.trim() || '智能问数';
+const ASK_DATA_DIRECT_ENTRY_ID = 'ask-data-direct-entry';
+const ASK_DATA_DIRECT_ENTRY_TYPE = 'ask_data';
 
 function parseThinkingStepDurations(raw: unknown): number[] | undefined {
   if (raw == null) return undefined;
@@ -643,6 +640,8 @@ const ChatComposer = React.memo(function ChatComposer({
   canChat,
   isLoading,
   thinkingModeEnabled,
+  askDataShortcutSkill,
+  onSelectAskDataShortcut,
   setThinkingModeEnabled,
   selectedSkill,
   setSkillSheetOpen,
@@ -655,6 +654,8 @@ const ChatComposer = React.memo(function ChatComposer({
   canChat: boolean;
   isLoading: boolean;
   thinkingModeEnabled: boolean;
+  askDataShortcutSkill: ChatSelectedSkill | null;
+  onSelectAskDataShortcut: () => void;
   setThinkingModeEnabled: React.Dispatch<React.SetStateAction<boolean>>;
   selectedSkill: ChatSelectedSkill | null;
   setSkillSheetOpen: React.Dispatch<React.SetStateAction<boolean>>;
@@ -715,6 +716,27 @@ const ChatComposer = React.memo(function ChatComposer({
           <LayoutGrid className="size-4 shrink-0" aria-hidden />
           <span className="hidden sm:inline">技能</span>
         </button>
+        {askDataShortcutSkill ? (
+          <button
+            type="button"
+            onClick={onSelectAskDataShortcut}
+            disabled={!canChat || isLoading}
+            aria-pressed={selectedSkill?.id === askDataShortcutSkill.id}
+            title={`快捷切换到${askDataShortcutSkill.name}`}
+            className={cn(
+              'flex h-10 shrink-0 items-center gap-1 rounded-full px-2 text-xs font-medium transition-colors sm:px-2.5',
+              !canChat || isLoading
+                ? 'cursor-not-allowed opacity-40'
+                : selectedSkill?.id === askDataShortcutSkill.id
+                  ? 'bg-primary/15 text-primary hover:bg-primary/20'
+                  : 'text-muted-foreground hover:bg-muted/70',
+            )}
+          >
+            <Sparkles className="size-4 shrink-0" aria-hidden />
+            <span className="hidden sm:inline">{askDataShortcutSkill.name}</span>
+            <span className="sm:hidden">问数</span>
+          </button>
+        ) : null}
         {selectedSkill ? (
           <div className="flex min-h-9 w-full min-w-0 basis-full items-center gap-0.5 rounded-full bg-muted/80 py-1 pl-2 pr-1 text-xs text-foreground sm:w-auto sm:max-w-[min(40%,220px)] sm:basis-auto">
             <span className="min-w-0 flex-1 truncate font-medium sm:flex-initial" title={selectedSkill.name}>
@@ -769,80 +791,6 @@ const ChatComposer = React.memo(function ChatComposer({
     </form>
   );
 });
-
-function WorkModeBanner({
-  title,
-  description,
-  chips,
-}: {
-  title: string;
-  description: string;
-  chips: string[];
-}) {
-  return (
-    <div className="px-3 pt-3 sm:px-4">
-      <div className="mx-auto w-full max-w-3xl rounded-2xl border border-border/70 bg-background/70 px-4 py-3">
-        <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
-          <div className="min-w-0">
-            <p className="text-sm font-medium text-foreground">{title}</p>
-            <p className="mt-1 text-xs leading-5 text-muted-foreground">
-              {description}
-            </p>
-          </div>
-          <div className="flex flex-wrap gap-2">
-            {chips.map((chip) => (
-              <span
-                key={chip}
-                className="rounded-full bg-primary/10 px-2.5 py-1 text-[11px] font-medium text-primary"
-              >
-                {chip}
-              </span>
-            ))}
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function SkillSuggestions({
-  skills,
-  onSelect,
-}: {
-  skills: Skill[];
-  onSelect: (skill: ChatSelectedSkill) => void;
-}) {
-  if (skills.length === 0) return null;
-
-  return (
-    <div className="mx-auto flex w-full max-w-3xl flex-col gap-2">
-      <div className="rounded-2xl border border-border/70 bg-background/70 px-4 py-3">
-        <p className="text-sm font-medium text-foreground">建议使用这些技能</p>
-        <p className="mt-1 text-xs leading-5 text-muted-foreground">
-          如果你的目标很明确，选一个技能后通常能更快进入任务执行状态。
-        </p>
-        <div className="mt-3 flex flex-wrap gap-2">
-          {skills.map((skill) => (
-            <button
-              key={skill.id}
-              type="button"
-              onClick={() =>
-                onSelect({
-                  id: skill.id,
-                  name: skill.name,
-                  icon: skill.icon,
-                })
-              }
-              className="rounded-full border border-border bg-background px-3 py-1.5 text-xs font-medium text-foreground transition-colors hover:bg-muted"
-            >
-              {skill.name}
-            </button>
-          ))}
-        </div>
-      </div>
-    </div>
-  );
-}
 
 const ChatMessageList = React.memo(function ChatMessageList({
   localMessages,
@@ -1001,13 +949,14 @@ export default function NexusChat({
   }, []);
 
   useEffect(() => {
+    if (!isReady || !isAuthenticated) return;
     fetch('/api/settings')
       .then((r) => (r.ok ? r.json() : null))
       .then((s) => {
         if (s?.defaultModel) updateConfig({ model: s.defaultModel });
       })
       .catch(() => {});
-  }, [updateConfig]);
+  }, [isAuthenticated, isReady, updateConfig]);
 
   const handleModelChange = async (value: string) => {
     updateConfig({ model: value });
@@ -1099,6 +1048,17 @@ export default function NexusChat({
   }, [selectedSkill]);
 
   useEffect(() => {
+    const shouldLoadSkills =
+      skillSheetOpen ||
+      Boolean(ASK_DATA_SKILL_ID && !ASK_DATA_DIRECT_ENABLED) ||
+      Boolean(
+        selectedSkill &&
+          selectedSkill.entryResourceType !== ASK_DATA_DIRECT_ENTRY_TYPE,
+      );
+    if (!shouldLoadSkills) {
+      return;
+    }
+
     let cancelled = false;
 
     const loadSkills = async () => {
@@ -1119,7 +1079,7 @@ export default function NexusChat({
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [selectedSkill, skillSheetOpen]);
 
   const prevActiveConversationId = useRef<string | null>(activeConversationId);
   /** 浠呯敤浜庢仮澶嶆媺鍙栵細棣栧抚涓?null锛屼究浜庡湪銆屽埛鏂?/ 棣栨杩涘叆甯?id銆嶆椂涓庡綋鍓?id 姣旇緝涓哄凡鍙樺寲锛屼粠鑰屽繀瀹氳姹傛湇鍔＄ */
@@ -1127,19 +1087,30 @@ export default function NexusChat({
   const localMessagesRef = useRef<Message[]>([]);
   localMessagesRef.current = localMessages;
   const deferredMessages = useDeferredValue(localMessages);
-  const recommendedSkills = useMemo(
-    () => recommendSkills(availableSkills, input),
-    [availableSkills, input],
-  );
-  const workModeSummary = useMemo(
-    () =>
-      getWorkModeSummary({
-        canChat,
-        thinkingModeEnabled,
-        selectedSkill,
-      }),
-    [canChat, selectedSkill, thinkingModeEnabled],
-  );
+  const askDataShortcutSkill = useMemo<ChatSelectedSkill | null>(() => {
+    if (ASK_DATA_DIRECT_ENABLED) {
+      return {
+        id: ASK_DATA_DIRECT_ENTRY_ID,
+        name: ASK_DATA_BUTTON_LABEL,
+        entryResourceType: ASK_DATA_DIRECT_ENTRY_TYPE,
+        entryResourceId: 'portal',
+      };
+    }
+    if (!ASK_DATA_SKILL_ID) {
+      return null;
+    }
+    const matched = availableSkills.find((skill) => skill.id === ASK_DATA_SKILL_ID);
+    if (!matched) {
+      return null;
+    }
+    return {
+      id: ASK_DATA_SKILL_ID,
+      name: matched.name,
+      icon: matched.icon,
+      entryResourceType: 'skill',
+      entryResourceId: ASK_DATA_SKILL_ID,
+    };
+  }, [availableSkills]);
 
   /** 鏈嶅姟绔?鎸佷箙鍖?store 鏇存柊鏃跺悓姝ュ埌鏈湴锛涗笌鏈湴鎸囩汗涓€鑷村垯璺宠繃锛岄伩鍏嶄笌銆屾湰鍦扳啋store 闃叉姈銆嶄簰鐩告墦鏋?*/
   useEffect(() => {
@@ -1336,6 +1307,12 @@ export default function NexusChat({
     }
   }, [abortController]);
 
+  const handleSelectAskDataShortcut = useCallback(() => {
+    if (askDataShortcutSkill) {
+      setSelectedSkill(askDataShortcutSkill);
+    }
+  }, [askDataShortcutSkill]);
+
   const runAssistantStream = useCallback(
     async (params: {
       assistantMessageId: string;
@@ -1436,8 +1413,10 @@ export default function NexusChat({
             enableThinking,
             ...(entrySkill
               ? {
-                  entryResourceType: 'skill',
-                  entryResourceId: entrySkill.id,
+                  entryResourceType:
+                    entrySkill.entryResourceType || 'skill',
+                  entryResourceId:
+                    entrySkill.entryResourceId || entrySkill.id,
                 }
               : {}),
           }),
@@ -1891,11 +1870,6 @@ export default function NexusChat({
         isLoading={isLoading}
         handleStop={handleStop}
       />
-      <WorkModeBanner
-        title={workModeSummary.title}
-        description={workModeSummary.description}
-        chips={workModeSummary.chips}
-      />
 
       {shellLoading ? (
         <ChatShellSkeleton />
@@ -1911,34 +1885,14 @@ export default function NexusChat({
                   你可以直接提问、整理资料、生成内容、做图表，或者先让我判断该调用哪种能力。
                 </p>
               </div>
-              <div className="grid w-full max-w-3xl gap-3 sm:grid-cols-3">
-                {[
-                  '帮我整理一份竞品调研提纲，并列出下一步访谈问题',
-                  '把这组数据做成图表，并告诉我最值得关注的异常点',
-                  '根据会议纪要生成一封对外同步邮件，语气专业但简洁',
-                ].map((prompt) => (
-                  <button
-                    key={prompt}
-                    type="button"
-                    onClick={() => setInput(prompt)}
-                    className="rounded-2xl border border-border/70 bg-background/70 px-4 py-3 text-left text-sm leading-6 text-foreground transition-colors hover:bg-muted/40"
-                  >
-                    {prompt}
-                  </button>
-                ))}
-              </div>
-              {!selectedSkill ? (
-                <SkillSuggestions
-                  skills={recommendedSkills}
-                  onSelect={setSelectedSkill}
-                />
-              ) : null}
               <TypingIndicator visible={showTypingIndicator} />
               <ChatComposer
                 handleSubmit={handleSubmit}
                 canChat={canChat}
                 isLoading={isLoading}
                 thinkingModeEnabled={thinkingModeEnabled}
+                askDataShortcutSkill={askDataShortcutSkill}
+                onSelectAskDataShortcut={handleSelectAskDataShortcut}
                 setThinkingModeEnabled={setThinkingModeEnabled}
                 selectedSkill={selectedSkill}
                 setSkillSheetOpen={setSkillSheetOpen}
@@ -1963,19 +1917,13 @@ export default function NexusChat({
             showTypingIndicator={showTypingIndicator}
           />
           <div className="shrink-0 px-3 pt-2 sm:px-4 pb-safe-composer">
-            {!selectedSkill && input.trim().length > 0 ? (
-              <div className="mb-3">
-                <SkillSuggestions
-                  skills={recommendedSkills}
-                  onSelect={setSelectedSkill}
-                />
-              </div>
-            ) : null}
             <ChatComposer
               handleSubmit={handleSubmit}
               canChat={canChat}
               isLoading={isLoading}
               thinkingModeEnabled={thinkingModeEnabled}
+              askDataShortcutSkill={askDataShortcutSkill}
+              onSelectAskDataShortcut={handleSelectAskDataShortcut}
               setThinkingModeEnabled={setThinkingModeEnabled}
               selectedSkill={selectedSkill}
               setSkillSheetOpen={setSkillSheetOpen}

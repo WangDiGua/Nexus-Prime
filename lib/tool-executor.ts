@@ -37,17 +37,26 @@ export interface ToolExecutorConfig {
   routes: ToolRoute[];
 }
 
+export interface ToolExecutionContext {
+  requestContext?: Record<string, unknown>;
+}
+
 export class ToolExecutor {
   private tools: Map<string, LantuTool> = new Map();
   private routes: Map<string, ToolRoute> = new Map();
+  private executionContext: ToolExecutionContext;
 
-  constructor(executorConfig: ToolExecutorConfig) {
+  constructor(
+    executorConfig: ToolExecutorConfig,
+    executionContext: ToolExecutionContext = {},
+  ) {
     for (const tool of executorConfig.tools) {
       this.tools.set(tool.function.name, tool);
     }
     for (const route of executorConfig.routes) {
       this.routes.set(route.toolName, route);
     }
+    this.executionContext = executionContext;
   }
 
   getToolDefinitions(): LantuTool[] {
@@ -60,6 +69,11 @@ export class ToolExecutor {
 
   getTool(name: string): LantuTool | undefined {
     return this.tools.get(name);
+  }
+
+  buildCacheKey(toolCall: ToolCall): string {
+    const args = this.normalizeArgsForExecution(toolCall);
+    return `${toolCall.name}:${JSON.stringify(args)}`;
   }
 
   async execute(toolCall: ToolCall): Promise<ToolResult> {
@@ -87,7 +101,7 @@ export class ToolExecutor {
     }
 
     try {
-      const cleanedArgs = cleanMarkdownFormatting(toolCall.args) as Record<string, unknown>;
+      const cleanedArgs = this.normalizeArgsForExecution(toolCall);
       
       console.log(`[ToolExecutor] 🧹 参数清理:`, {
         original: toolCall.args,
@@ -97,7 +111,7 @@ export class ToolExecutor {
 
       let payload: Record<string, unknown>;
       
-      if (route.resourceType === 'mcp') {
+      if (route.resourceType === 'mcp' || route.resourceType === 'ask_data') {
         const originalToolName = toolCall.name.replace(/^mcp_\d+_/, '');
         payload = {
           method: 'tools/call',
@@ -149,6 +163,41 @@ export class ToolExecutor {
     }
   }
 
+  private normalizeArgsForExecution(toolCall: ToolCall): Record<string, unknown> {
+    const cleanedArgs = cleanMarkdownFormatting(toolCall.args) as Record<string, unknown>;
+    const route = this.routes.get(toolCall.name);
+    if (
+      !route ||
+      (route.resourceType !== 'mcp' && route.resourceType !== 'ask_data')
+    ) {
+      return cleanedArgs;
+    }
+
+    const originalToolName = toolCall.name.replace(/^mcp_\d+_/, '');
+    if (originalToolName !== 'ask_data_query') {
+      return cleanedArgs;
+    }
+
+    const existingRequestContext =
+      cleanedArgs.request_context &&
+      typeof cleanedArgs.request_context === 'object' &&
+      !Array.isArray(cleanedArgs.request_context)
+        ? (cleanedArgs.request_context as Record<string, unknown>)
+        : {};
+
+    const mergedRequestContext = {
+      ...existingRequestContext,
+      ...(this.executionContext.requestContext ?? {}),
+    };
+
+    return {
+      ...cleanedArgs,
+      ...(Object.keys(mergedRequestContext).length > 0
+        ? { request_context: mergedRequestContext }
+        : {}),
+    };
+  }
+
   formatResultForLLM(result: ToolResult): string {
     if (result.status === 'error') {
       return JSON.stringify({
@@ -170,7 +219,8 @@ export class ToolExecutor {
 
 export async function createToolExecutor(
   entryResourceType?: string,
-  entryResourceId?: string
+  entryResourceId?: string,
+  executionContext: ToolExecutionContext = {},
 ): Promise<ToolExecutor> {
   const lantuClient = await getLantuClient();
   const { tools, routes } = await lantuClient.fetchAggregatedTools(
@@ -178,5 +228,5 @@ export async function createToolExecutor(
     entryResourceId
   );
 
-  return new ToolExecutor({ tools, routes });
+  return new ToolExecutor({ tools, routes }, executionContext);
 }

@@ -4,6 +4,10 @@ import {
   createLantuConnectConfigFromEnv,
 } from 'lantuconnect-sdk';
 import { ApiConfig, createApiConfig } from './api-config';
+import { callDirectMcpTool, fetchDirectMcpTools } from './direct-mcp';
+
+const DIRECT_ASK_DATA_RESOURCE_TYPE = 'ask_data';
+const DIRECT_ASK_DATA_RESOURCE_ID = 'portal';
 
 export interface LantuResource {
   id: string;
@@ -73,6 +77,17 @@ export interface AggregatedToolsResponse {
     resourceId: string;
   }>;
   warnings?: string[];
+}
+
+function getDirectAskDataSseUrl(): string | null {
+  const value = process.env.NEXUS_ASK_DATA_MCP_SSE_URL?.trim();
+  return value ? value : null;
+}
+
+function getDirectAskDataTimeoutMs(): number {
+  const raw = process.env.NEXUS_ASK_DATA_MCP_TIMEOUT_MS;
+  const parsed = raw ? Number(raw) : NaN;
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 20000;
 }
 
 function createCoreClient(config: ApiConfig): LantuConnectClient {
@@ -189,11 +204,61 @@ export class LantuClient {
     const actualEntryType = entryResourceType || this.config.entryResource.type;
     const actualEntryId = entryResourceId || this.config.entryResource.id;
 
+    if (actualEntryType === DIRECT_ASK_DATA_RESOURCE_TYPE) {
+      return this.fetchAggregatedToolsFromDirectAskData();
+    }
+
     if (actualEntryType && actualEntryId) {
       return this.fetchAggregatedToolsFromEntry(actualEntryType, actualEntryId);
     }
 
     return this.fetchAggregatedToolsFromMcpList();
+  }
+
+  private async fetchAggregatedToolsFromDirectAskData(): Promise<AggregatedToolsResponse> {
+    const sseUrl = getDirectAskDataSseUrl();
+    if (!sseUrl) {
+      return {
+        tools: [],
+        routes: [],
+        warnings: ['NEXUS_ASK_DATA_MCP_SSE_URL is not configured'],
+      };
+    }
+
+    try {
+      const toolsList = await fetchDirectMcpTools(
+        sseUrl,
+        getDirectAskDataTimeoutMs(),
+      );
+      const tools: LantuTool[] = toolsList.map((tool) => ({
+        type: 'function',
+        function: {
+          name: tool.name,
+          description: tool.description || 'Direct ask_data MCP tool',
+          parameters:
+            (tool.inputSchema as LantuTool['function']['parameters']) ||
+            ({ type: 'object', properties: {} } as LantuTool['function']['parameters']),
+        },
+        _lantu: {
+          resourceType: DIRECT_ASK_DATA_RESOURCE_TYPE,
+          resourceId: DIRECT_ASK_DATA_RESOURCE_ID,
+          resourceName: 'ask_data',
+        },
+      }));
+
+      const routes = tools.map((tool) => ({
+        toolName: tool.function.name,
+        resourceType: DIRECT_ASK_DATA_RESOURCE_TYPE,
+        resourceId: DIRECT_ASK_DATA_RESOURCE_ID,
+      }));
+
+      return { tools, routes, warnings: [] };
+    } catch (error) {
+      const msg =
+        error instanceof Error ? error.message : String(error);
+      console.error('Failed to fetch direct ask_data tools:', error);
+      return { tools: [], routes: [], warnings: [msg] };
+    }
   }
 
   private async fetchAggregatedToolsFromEntry(
@@ -400,6 +465,10 @@ export class LantuClient {
   async invoke(request: InvokeRequest): Promise<InvokeResponse> {
     const startTime = Date.now();
 
+    if (request.resourceType === DIRECT_ASK_DATA_RESOURCE_TYPE) {
+      return this.invokeDirectAskData(request);
+    }
+
     if (request.resourceType === 'mcp') {
       return this.invokeMcp(request);
     }
@@ -434,6 +503,53 @@ export class LantuClient {
             ? error.message
             : String(error);
       console.error('Failed to invoke tool:', error);
+      return {
+        success: false,
+        error: msg,
+        latency: Date.now() - startTime,
+      };
+    }
+  }
+
+  private async invokeDirectAskData(request: InvokeRequest): Promise<InvokeResponse> {
+    const startTime = Date.now();
+    const sseUrl = getDirectAskDataSseUrl();
+
+    if (!sseUrl) {
+      return {
+        success: false,
+        error: 'NEXUS_ASK_DATA_MCP_SSE_URL is not configured',
+        latency: Date.now() - startTime,
+      };
+    }
+
+    try {
+      const payload = request.payload as {
+        method?: string;
+        name?: string;
+        arguments?: Record<string, unknown>;
+      } | undefined;
+
+      if (payload?.method !== 'tools/call' || !payload.name) {
+        throw new Error('Invalid direct ask_data payload format');
+      }
+
+      const data = await callDirectMcpTool(
+        sseUrl,
+        getDirectAskDataTimeoutMs(),
+        payload.name,
+        payload.arguments || {},
+      );
+
+      return {
+        success: true,
+        data,
+        latency: Date.now() - startTime,
+      };
+    } catch (error) {
+      const msg =
+        error instanceof Error ? error.message : String(error);
+      console.error('Failed to invoke direct ask_data tool:', error);
       return {
         success: false,
         error: msg,
