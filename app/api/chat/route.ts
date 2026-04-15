@@ -29,6 +29,125 @@ interface ToolCallAccum {
   arguments: string;
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+function getLatestUserMessage(
+  messages: Array<{ role: string; content: string }>,
+): string | null {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (message?.role === 'user' && message.content?.trim()) {
+      return message.content.trim();
+    }
+  }
+  return null;
+}
+
+const ASK_DATA_IDENTIFIER_PATTERN =
+  /(工号|教工号|职工号|学号|学工号)\s*(?:是|为|=|:|：)?\s*([A-Za-z0-9_-]+)/u;
+
+const ASK_DATA_REFERENCE_PATTERN = /^(他|她|ta|TA|这个老师|这个学生|这个人|此人)(的)?/u;
+
+function normalizeAskDataFollowup(content: string): string {
+  return content
+    .trim()
+    .replace(
+      /^(我要|我想|我想看|我想查|我想要|帮我查一下|帮我查|查一下|查查|看一下|看下|请查一下|请查|请帮我查一下|请帮我查)\s*/u,
+      '',
+    )
+    .trim();
+}
+
+function buildForcedAskDataQuery(
+  messages: Array<{ role: string; content: string }>,
+): string | null {
+  const latest = getLatestUserMessage(messages);
+  if (!latest) {
+    return null;
+  }
+
+  if (ASK_DATA_IDENTIFIER_PATTERN.test(latest)) {
+    return latest.trim();
+  }
+
+  let previousIdentifier:
+    | {
+        label: string;
+        value: string;
+      }
+    | undefined;
+
+  for (let index = messages.length - 2; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (message?.role !== 'user' || !message.content?.trim()) {
+      continue;
+    }
+    const match = message.content.trim().match(ASK_DATA_IDENTIFIER_PATTERN);
+    if (match) {
+      previousIdentifier = {
+        label: match[1],
+        value: match[2],
+      };
+      break;
+    }
+  }
+
+  if (!previousIdentifier) {
+    return latest.trim();
+  }
+
+  const normalized = normalizeAskDataFollowup(latest);
+  if (!normalized) {
+    return latest.trim();
+  }
+
+  if (ASK_DATA_REFERENCE_PATTERN.test(normalized)) {
+    const suffix = normalized.replace(ASK_DATA_REFERENCE_PATTERN, '').replace(/^的+/u, '').trim();
+    if (!suffix) {
+      return `${previousIdentifier.label}${previousIdentifier.value}`;
+    }
+    return `${previousIdentifier.label}${previousIdentifier.value}的${suffix}`;
+  }
+
+  if (
+    /(出国记录|出访记录|出国明细|出访明细|职称|姓名|所在单位|学院|专业|行政职务|状态|政治面貌|名单|详情|信息|资料)/u.test(
+      normalized,
+    )
+  ) {
+    return `${previousIdentifier.label}${previousIdentifier.value}的${normalized.replace(/^的+/u, '')}`;
+  }
+
+  return latest.trim();
+}
+
+function buildForcedAskDataContent(result: ToolResult): string {
+  if (result.status === 'error') {
+    return `本次问数执行失败：${result.error || '未知错误'}`;
+  }
+
+  if (!isRecord(result.result)) {
+    return '已完成问数查询，请查看返回结果。';
+  }
+
+  const payload = result.result;
+  const clarificationRequired = payload.clarification_required === true;
+  const clarificationQuestion =
+    typeof payload.clarification_question === 'string'
+      ? payload.clarification_question.trim()
+      : '';
+  const text = typeof payload.text === 'string' ? payload.text.trim() : '';
+
+  if (clarificationRequired && clarificationQuestion) {
+    return clarificationQuestion;
+  }
+  if (text) {
+    return text;
+  }
+  return '已完成问数查询，请查看图表或表格结果。';
+}
+
 function mergeToolCallStreamDeltas(
   delta: {
     tool_calls?: Array<{
@@ -435,6 +554,35 @@ async function callLLM(
   return result;
 }
 
+async function executeToolCallWithCache(
+  toolCall: ToolCall,
+  toolExecutor: Awaited<ReturnType<typeof createToolExecutor>>,
+): Promise<ToolResult> {
+  const cacheKey = toolExecutor.buildCacheKey(toolCall);
+  const { toolCache } = await getCaches();
+
+  let cachedResult: ToolResult | null = null;
+  try {
+    cachedResult = await toolCache.get<ToolResult>(cacheKey);
+  } catch (e) {
+    console.warn('[Cache] Redis 不可用，跳过工具读缓存', e);
+  }
+  if (cachedResult) {
+    console.log(`[Cache] Tool result hit for ${toolCall.name}`);
+    return { ...cachedResult, cached: true };
+  }
+
+  const result = await toolExecutor.execute(toolCall);
+  if (result.status === 'success') {
+    try {
+      await toolCache.set(cacheKey, result, 86400);
+    } catch (e) {
+      console.warn('[Cache] Redis 不可用，跳过工具写缓存', e);
+    }
+  }
+  return result;
+}
+
 export async function POST(req: NextRequest) {
   if (!DASHSCOPE_API_KEY || !DASHSCOPE_BASE_URL) {
     return new Response(
@@ -576,6 +724,10 @@ export async function POST(req: NextRequest) {
             ...(authUser?.username ? { actor_name: authUser.username } : {}),
             ...(authUser?.role ? { actor_role: authUser.role } : {}),
             ...(body.conversationId ? { conversation_id: body.conversationId } : {}),
+            recent_user_messages: userMessages
+              .filter((message) => message.role === 'user' && message.content?.trim())
+              .slice(-6)
+              .map((message) => message.content.trim()),
           },
         },
       );
@@ -583,6 +735,66 @@ export async function POST(req: NextRequest) {
       const hasAskDataTool = tools.some((tool) =>
         tool.function.name.includes('ask_data_query'),
       );
+      const forcedAskDataMode =
+        body.entryResourceType === 'ask_data' && hasAskDataTool;
+      const latestUserQuery = buildForcedAskDataQuery(userMessages);
+
+      if (forcedAskDataMode && latestUserQuery) {
+        const askDataTool = tools.find((tool) =>
+          tool.function.name.includes('ask_data_query'),
+        );
+
+        if (askDataTool) {
+          const forcedToolCall: ToolCall = {
+            id: `forced_ask_data_${Date.now()}`,
+            name: askDataTool.function.name,
+            args: {
+              query_text: latestUserQuery,
+            },
+          };
+
+          await writer.write(
+            encoder.encode(
+              encodeSSE({
+                type: 'thinking',
+                content: '智能问数模式已启用，正在优先调用问数工具。',
+              }),
+            ),
+          );
+          await writer.write(
+            encoder.encode(
+              encodeSSE({
+                type: 'tool_call',
+                toolCall: forcedToolCall,
+              }),
+            ),
+          );
+
+          const forcedResult = await executeToolCallWithCache(
+            forcedToolCall,
+            toolExecutor,
+          );
+
+          await writer.write(
+            encoder.encode(
+              encodeSSE({
+                type: 'tool_result',
+                result: forcedResult,
+              }),
+            ),
+          );
+          await writer.write(
+            encoder.encode(
+              encodeSSE({
+                type: 'content',
+                content: buildForcedAskDataContent(forcedResult),
+              }),
+            ),
+          );
+          await writer.write(encoder.encode(encodeSSE({ type: 'done' })));
+          return;
+        }
+      }
 
       console.log(`[ReAct] 📦 获取到 ${tools.length} 个工具定义`);
 
@@ -650,6 +862,8 @@ export async function POST(req: NextRequest) {
 When the user asks for campus business data, grouped statistics, rankings, trends, rosters, or identifier-based attribute lookup, prefer the ask_data_query tool.
 - Do not guess numbers, factual records, or attribute values from memory.
 - If the tool returns a table, chart, or clarification question, use that result directly.
+- If a chart is available, summarize the answer instead of rewriting the full dataset row by row.
+- Keep the narrative to 1-3 key takeaways when the chart already shows the detail.
 - For employee number, student number, roster, title, department, status, and similar point lookups, call the data tool before answering.
 `
         : '';
@@ -664,6 +878,7 @@ The user explicitly entered 智能问数 mode.
 - Treat this conversation as a campus data query workflow first.
 - Prefer asking the ask_data_query tool for factual data, statistics, dimensions, trends, rosters, and identifier-based lookups.
 - Keep answers grounded in tool output instead of general speculation.
+- When chart data is available, keep the written answer brief and insight-focused.
 `
           : '';
 

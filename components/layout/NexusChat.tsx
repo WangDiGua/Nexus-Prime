@@ -3,6 +3,7 @@
 import React, {
   useRef,
   useEffect,
+  useLayoutEffect,
   useState,
   useCallback,
   useMemo,
@@ -27,6 +28,7 @@ import {
   thinkingLogRowTextClass,
 } from '@/components/chat/thinking-log-line';
 import ChatMessage from '@/components/chat/ChatMessage';
+import { ToolInvocationPanel } from '@/components/chat/ToolInvocationPanel';
 import { ModelSelect } from '@/components/ui/model-select';
 import {
   buildChatModelOptions,
@@ -669,6 +671,19 @@ const ChatComposer = React.memo(function ChatComposer({
   setInput: React.Dispatch<React.SetStateAction<string>>;
   isReady: boolean;
 }) {
+  const selectedAskDataShortcut = Boolean(
+    askDataShortcutSkill &&
+      selectedSkill?.id === askDataShortcutSkill.id &&
+      selectedSkill.entryResourceId === askDataShortcutSkill.entryResourceId,
+  );
+  const askDataShortcutActive = Boolean(
+    askDataShortcutSkill && selectedAskDataShortcut,
+  );
+  const customSkillSelected = Boolean(
+    selectedSkill &&
+      !selectedAskDataShortcut,
+  );
+
   return (
     <form onSubmit={handleSubmit} className="relative mx-auto w-full max-w-3xl">
       <div
@@ -703,9 +718,9 @@ const ChatComposer = React.memo(function ChatComposer({
           type="button"
           onClick={() => setSkillSheetOpen(true)}
           disabled={!canChat || isLoading}
-          aria-pressed={Boolean(selectedSkill)}
+          aria-pressed={customSkillSelected}
           title={
-            selectedSkill
+            customSkillSelected && selectedSkill
               ? '当前技能：' + selectedSkill.name + '（点击更换）'
               : '技能商店：选择后作为对话工具入口'
           }
@@ -713,7 +728,7 @@ const ChatComposer = React.memo(function ChatComposer({
             'flex h-10 shrink-0 items-center gap-1 rounded-full px-2 text-xs font-medium transition-colors sm:px-2.5',
             !canChat || isLoading
               ? 'cursor-not-allowed opacity-40'
-              : selectedSkill
+              : customSkillSelected
                 ? 'bg-primary/15 text-primary hover:bg-primary/20'
                 : 'text-muted-foreground hover:bg-muted/70',
           )}
@@ -726,13 +741,13 @@ const ChatComposer = React.memo(function ChatComposer({
             type="button"
             onClick={onSelectAskDataShortcut}
             disabled={!canChat || isLoading}
-            aria-pressed={selectedSkill?.id === askDataShortcutSkill.id}
+            aria-pressed={askDataShortcutActive}
             title={`快捷切换到${askDataShortcutSkill.name}`}
             className={cn(
               'flex h-10 shrink-0 items-center gap-1 rounded-full px-2 text-xs font-medium transition-colors sm:px-2.5',
               !canChat || isLoading
                 ? 'cursor-not-allowed opacity-40'
-                : selectedSkill?.id === askDataShortcutSkill.id
+                : askDataShortcutActive
                   ? 'bg-primary/15 text-primary hover:bg-primary/20'
                   : 'text-muted-foreground hover:bg-muted/70',
             )}
@@ -742,7 +757,7 @@ const ChatComposer = React.memo(function ChatComposer({
             <span className="sm:hidden">问数</span>
           </button>
         ) : null}
-        {selectedSkill ? (
+        {customSkillSelected && selectedSkill ? (
           <div className="flex min-h-9 w-full min-w-0 basis-full items-center gap-0.5 rounded-full bg-muted/80 py-1 pl-2 pr-1 text-xs text-foreground sm:w-auto sm:max-w-[min(40%,220px)] sm:basis-auto">
             <span className="min-w-0 flex-1 truncate font-medium sm:flex-initial" title={selectedSkill.name}>
               {selectedSkill.name}
@@ -787,7 +802,9 @@ const ChatComposer = React.memo(function ChatComposer({
       </div>
       <div className="mt-2 flex flex-wrap items-center justify-between gap-2 px-2 text-[11px] text-muted-foreground">
         <span>
-          {selectedSkill
+          {askDataShortcutActive && askDataShortcutSkill
+            ? '当前输入会优先走“' + askDataShortcutSkill.name + '”入口。'
+            : selectedSkill
             ? '当前会话会优先围绕“' + selectedSkill.name + '”调用更合适的工具。'
             : '先直接描述任务，系统会根据上下文决定是否需要调用工具。'}
         </span>
@@ -804,6 +821,8 @@ const ChatMessageList = React.memo(function ChatMessageList({
   thinkingModeEnabled,
   handleCopyAssistant,
   handleRegenerateAssistant,
+  openToolPanelForMessage,
+  activeToolPanelMessageId,
   scrollRef,
   showTypingIndicator,
 }: {
@@ -813,6 +832,8 @@ const ChatMessageList = React.memo(function ChatMessageList({
   thinkingModeEnabled: boolean;
   handleCopyAssistant: (text: string) => Promise<void>;
   handleRegenerateAssistant: (assistantMessageId: string) => Promise<void>;
+  openToolPanelForMessage: (messageId: string) => void;
+  activeToolPanelMessageId: string | null;
   scrollRef: React.RefObject<HTMLDivElement | null>;
   showTypingIndicator: boolean;
 }) {
@@ -848,6 +869,8 @@ const ChatMessageList = React.memo(function ChatMessageList({
             regenerateDisabled={regenerateDisabled}
             handleCopyAssistant={handleCopyAssistant}
             handleRegenerateAssistant={handleRegenerateAssistant}
+            openToolPanelForMessage={openToolPanelForMessage}
+            toolPanelActive={activeToolPanelMessageId === msg.id}
           />
         );
       })}
@@ -865,6 +888,8 @@ const ChatMessageRow = React.memo(function ChatMessageRow({
   regenerateDisabled,
   handleCopyAssistant,
   handleRegenerateAssistant,
+  openToolPanelForMessage,
+  toolPanelActive,
 }: {
   message: Message;
   isStreaming: boolean;
@@ -874,6 +899,8 @@ const ChatMessageRow = React.memo(function ChatMessageRow({
   regenerateDisabled: boolean;
   handleCopyAssistant: (text: string) => Promise<void>;
   handleRegenerateAssistant: (assistantMessageId: string) => Promise<void>;
+  openToolPanelForMessage: (messageId: string) => void;
+  toolPanelActive: boolean;
 }) {
   return (
     <div className="space-y-2">
@@ -898,6 +925,13 @@ const ChatMessageRow = React.memo(function ChatMessageRow({
             : undefined
         }
         regenerateDisabled={regenerateDisabled}
+        onOpenToolPanel={
+          message.role === 'assistant' &&
+          (message.toolInvocations?.length ?? 0) > 0
+            ? () => openToolPanelForMessage(message.id)
+            : undefined
+        }
+        toolPanelActive={toolPanelActive}
       />
     </div>
   );
@@ -909,8 +943,10 @@ const ChatMessageRow = React.memo(function ChatMessageRow({
     prev.showDots === next.showDots &&
     prev.showAssistantActions === next.showAssistantActions &&
     prev.regenerateDisabled === next.regenerateDisabled &&
+    prev.toolPanelActive === next.toolPanelActive &&
     prev.handleCopyAssistant === next.handleCopyAssistant &&
-    prev.handleRegenerateAssistant === next.handleRegenerateAssistant
+    prev.handleRegenerateAssistant === next.handleRegenerateAssistant &&
+    prev.openToolPanelForMessage === next.openToolPanelForMessage
   );
 });
 
@@ -979,6 +1015,8 @@ export default function NexusChat({
   const [selectedSkill, setSelectedSkill] = useState<ChatSelectedSkill | null>(
     null,
   );
+  const [toolPanelMessageId, setToolPanelMessageId] = useState<string | null>(null);
+  const [toolPanelOpen, setToolPanelOpen] = useState(false);
   const [publicSystemConfig, setPublicSystemConfig] = useState(() => ({
     askDataSkillId: FALLBACK_ASK_DATA_SKILL_ID,
     askDataDirectEnabled: FALLBACK_ASK_DATA_DIRECT_ENABLED,
@@ -1025,6 +1063,15 @@ export default function NexusChat({
   }, [publicSystemConfig, selectedSkill, skillSheetOpen]);
 
   const deferredMessages = useDeferredValue(localMessages);
+  const activeToolMessage = useMemo(
+    () =>
+      localMessages.find(
+        (message) =>
+          message.id === toolPanelMessageId &&
+          (message.toolInvocations?.length ?? 0) > 0,
+      ) ?? null,
+    [localMessages, toolPanelMessageId],
+  );
   const askDataShortcutSkill = useMemo<ChatSelectedSkill | null>(() => {
     if (publicSystemConfig.askDataDirectEnabled) {
       return {
@@ -1142,11 +1189,46 @@ export default function NexusChat({
     updateConfig,
   ]);
 
+  const scrollToLatestMessage = useCallback(() => {
+    const container = scrollRef.current;
+    if (!container) return;
+    container.scrollTo({
+      top: container.scrollHeight,
+      behavior: 'auto',
+    });
+  }, []);
+
+  useLayoutEffect(() => {
+    let frameA = 0;
+    let frameB = 0;
+
+    frameA = window.requestAnimationFrame(() => {
+      scrollToLatestMessage();
+      frameB = window.requestAnimationFrame(() => {
+        scrollToLatestMessage();
+      });
+    });
+
+    return () => {
+      window.cancelAnimationFrame(frameA);
+      window.cancelAnimationFrame(frameB);
+    };
+  }, [localMessages, isLoading, scrollToLatestMessage]);
+
   useEffect(() => {
-    if (scrollRef.current) {
-      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+    if (!activeToolMessage && toolPanelOpen) {
+      setToolPanelOpen(false);
     }
-  }, [localMessages, isLoading]);
+  }, [activeToolMessage, toolPanelOpen]);
+
+  const openToolPanelForMessage = useCallback((messageId: string) => {
+    setToolPanelMessageId(messageId);
+    setToolPanelOpen(true);
+  }, []);
+
+  const closeToolPanel = useCallback(() => {
+    setToolPanelOpen(false);
+  }, []);
 
   const saveMessageToDB = useCallback(async (
     role: 'USER' | 'ASSISTANT',
@@ -1202,7 +1284,12 @@ export default function NexusChat({
 
   const handleSelectAskDataShortcut = useCallback(() => {
     if (askDataShortcutSkill) {
-      setSelectedSkill(askDataShortcutSkill);
+      setSelectedSkill((current) =>
+        current?.id === askDataShortcutSkill.id &&
+        current.entryResourceId === askDataShortcutSkill.entryResourceId
+          ? null
+          : askDataShortcutSkill,
+      );
     }
   }, [askDataShortcutSkill]);
 
@@ -1437,6 +1524,8 @@ export default function NexusChat({
                         state: 'result',
                         result,
                       };
+                      setToolPanelMessageId(assistantMessageId);
+                      setToolPanelOpen(true);
 
                       addPacket({
                         id: 'result_' + result.toolCallId,
@@ -1797,35 +1886,47 @@ export default function NexusChat({
           </div>
         </div>
       ) : (
-        <>
-          <ChatMessageList
-            localMessages={deferredMessages}
-            regenerateDisabled={isLoading}
-            streamingAssistantId={streamingAssistantId}
-            thinkingModeEnabled={thinkingModeEnabled}
-            handleCopyAssistant={handleCopyAssistant}
-            handleRegenerateAssistant={handleRegenerateAssistant}
-            scrollRef={scrollRef}
-            showTypingIndicator={showTypingIndicator}
-          />
-          <div className="shrink-0 px-3 pt-2 sm:px-4 pb-safe-composer">
-            <ChatComposer
-              handleSubmit={handleSubmit}
-              canChat={canChat}
-              isLoading={isLoading}
+        <div className="flex min-h-0 flex-1 overflow-hidden">
+          <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+            <ChatMessageList
+              localMessages={deferredMessages}
+              regenerateDisabled={isLoading}
+              streamingAssistantId={streamingAssistantId}
               thinkingModeEnabled={thinkingModeEnabled}
-              askDataShortcutSkill={askDataShortcutSkill}
-              onSelectAskDataShortcut={handleSelectAskDataShortcut}
-              setThinkingModeEnabled={setThinkingModeEnabled}
-              selectedSkill={selectedSkill}
-              setSkillSheetOpen={setSkillSheetOpen}
-              setSelectedSkill={setSelectedSkill}
-              input={input}
-              setInput={setInput}
-              isReady={isReady}
+              handleCopyAssistant={handleCopyAssistant}
+              handleRegenerateAssistant={handleRegenerateAssistant}
+              openToolPanelForMessage={openToolPanelForMessage}
+              activeToolPanelMessageId={toolPanelOpen ? toolPanelMessageId : null}
+              scrollRef={scrollRef}
+              showTypingIndicator={showTypingIndicator}
             />
+            <div className="shrink-0 px-3 pt-2 sm:px-4 pb-safe-composer">
+              <ChatComposer
+                handleSubmit={handleSubmit}
+                canChat={canChat}
+                isLoading={isLoading}
+                thinkingModeEnabled={thinkingModeEnabled}
+                askDataShortcutSkill={askDataShortcutSkill}
+                onSelectAskDataShortcut={handleSelectAskDataShortcut}
+                setThinkingModeEnabled={setThinkingModeEnabled}
+                selectedSkill={selectedSkill}
+                setSkillSheetOpen={setSkillSheetOpen}
+                setSelectedSkill={setSelectedSkill}
+                input={input}
+                setInput={setInput}
+                isReady={isReady}
+              />
+            </div>
           </div>
-        </>
+          {activeToolMessage ? (
+            <ToolInvocationPanel
+              open={toolPanelOpen}
+              onClose={closeToolPanel}
+              messageContent={activeToolMessage.content}
+              invocations={activeToolMessage.toolInvocations ?? []}
+            />
+          ) : null}
+        </div>
       )}
       <SkillStoreSheet
         open={skillSheetOpen}

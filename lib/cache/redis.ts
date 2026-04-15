@@ -2,20 +2,144 @@ import Redis from 'ioredis';
 
 const globalForRedis = globalThis as unknown as {
   redis: Redis | undefined;
+  disabledReason: string | null | undefined;
+  disableLogged: boolean | undefined;
+  connectPromise: Promise<boolean> | null | undefined;
 };
 
-export function getRedis(): Redis {
-  if (!globalForRedis.redis) {
-    globalForRedis.redis = new Redis(process.env.REDIS_URL || 'redis://localhost:6379', {
-      password: process.env.REDIS_PASSWORD || undefined,
-      maxRetriesPerRequest: 3,
-      lazyConnect: true,
-    });
-    globalForRedis.redis.on('error', (error) => {
-      console.error('[Redis] client error:', error.message);
-    });
+function disableRedis(reason: string): void {
+  globalForRedis.disabledReason = reason;
+
+  if (globalForRedis.redis) {
+    globalForRedis.redis.removeAllListeners();
+    globalForRedis.redis.disconnect();
+    globalForRedis.redis = undefined;
   }
+
+  if (!globalForRedis.disableLogged) {
+    console.log(`[Redis] disabled: ${reason}`);
+    globalForRedis.disableLogged = true;
+  }
+}
+
+function getRedisDisableReason(error: unknown): string | null {
+  const message =
+    error instanceof Error ? error.message : String(error ?? 'unknown redis error');
+
+  if (/NOAUTH|WRONGPASS|AUTH/i.test(message)) {
+    return message;
+  }
+
+  if (
+    /Stream isn't writeable|Connection is closed|enableOfflineQueue options is false/i.test(
+      message,
+    )
+  ) {
+    return 'Redis connection is unavailable';
+  }
+
+  return null;
+}
+
+function getRedisOrNull(): Redis | null {
+  if (globalForRedis.disabledReason) {
+    return null;
+  }
+
+  if (!globalForRedis.redis) {
+    const redis = new Redis(process.env.REDIS_URL || 'redis://localhost:6379', {
+      password: process.env.REDIS_PASSWORD || undefined,
+      maxRetriesPerRequest: 1,
+      lazyConnect: true,
+      enableOfflineQueue: false,
+      retryStrategy: () => null,
+    });
+
+    redis.on('error', (error) => {
+      const message = error.message || 'unknown redis error';
+      if (/NOAUTH|WRONGPASS|AUTH/i.test(message)) {
+        disableRedis(message);
+        return;
+      }
+      console.error('[Redis] client error:', message);
+    });
+
+    globalForRedis.redis = redis;
+  }
+
   return globalForRedis.redis;
+}
+
+async function ensureRedisReady(redis: Redis): Promise<boolean> {
+  if (globalForRedis.disabledReason) {
+    return false;
+  }
+
+  if (redis.status === 'ready') {
+    return true;
+  }
+
+  if (!globalForRedis.connectPromise) {
+    globalForRedis.connectPromise = (async () => {
+      try {
+        if (redis.status === 'wait') {
+          await redis.connect();
+        } else if (redis.status !== 'ready') {
+          await new Promise<void>((resolve, reject) => {
+            const onReady = () => {
+              cleanup();
+              resolve();
+            };
+            const onError = (error: Error) => {
+              cleanup();
+              reject(error);
+            };
+            const cleanup = () => {
+              redis.off('ready', onReady);
+              redis.off('error', onError);
+            };
+            redis.on('ready', onReady);
+            redis.on('error', onError);
+            setTimeout(() => {
+              cleanup();
+              reject(new Error('Redis connect timeout'));
+            }, 3000);
+          });
+        }
+        return redis.status === 'ready';
+      } catch (error) {
+        const reason = getRedisDisableReason(error);
+        if (reason) {
+          disableRedis(reason);
+          return false;
+        }
+        throw error;
+      } finally {
+        globalForRedis.connectPromise = null;
+      }
+    })();
+  }
+
+  try {
+    return await globalForRedis.connectPromise;
+  } catch (error) {
+    const reason = getRedisDisableReason(error);
+    if (reason) {
+      disableRedis(reason);
+      return false;
+    }
+    throw error;
+  }
+}
+
+export function getRedis(): Redis {
+  const redis = getRedisOrNull();
+  if (!redis) {
+    throw new Error(
+      globalForRedis.disabledReason || 'Redis client is unavailable',
+    );
+  }
+  return redis;
 }
 
 export interface CacheOptions {
@@ -35,8 +159,21 @@ export class CacheService {
   }
 
   async get<T>(key: string): Promise<T | null> {
-    const redis = getRedis();
-    const data = await redis.get(this.getKey(key));
+    const redis = getRedisOrNull();
+    if (!redis) return null;
+    if (!(await ensureRedisReady(redis))) return null;
+
+    let data: string | null = null;
+    try {
+      data = await redis.get(this.getKey(key));
+    } catch (error) {
+      const reason = getRedisDisableReason(error);
+      if (reason) {
+        disableRedis(reason);
+        return null;
+      }
+      throw error;
+    }
     if (!data) return null;
     try {
       return JSON.parse(data) as T;
@@ -46,45 +183,126 @@ export class CacheService {
   }
 
   async set<T>(key: string, value: T, ttl?: number): Promise<void> {
-    const redis = getRedis();
+    const redis = getRedisOrNull();
+    if (!redis) return;
+    if (!(await ensureRedisReady(redis))) return;
+
     const data = typeof value === 'string' ? value : JSON.stringify(value);
-    if (ttl) {
-      await redis.setex(this.getKey(key), ttl, data);
-    } else {
-      await redis.set(this.getKey(key), data);
+    try {
+      if (ttl) {
+        await redis.setex(this.getKey(key), ttl, data);
+      } else {
+        await redis.set(this.getKey(key), data);
+      }
+    } catch (error) {
+      const reason = getRedisDisableReason(error);
+      if (reason) {
+        disableRedis(reason);
+        return;
+      }
+      throw error;
     }
   }
 
   async del(key: string): Promise<void> {
-    const redis = getRedis();
-    await redis.del(this.getKey(key));
+    const redis = getRedisOrNull();
+    if (!redis) return;
+    if (!(await ensureRedisReady(redis))) return;
+    try {
+      await redis.del(this.getKey(key));
+    } catch (error) {
+      const reason = getRedisDisableReason(error);
+      if (reason) {
+        disableRedis(reason);
+        return;
+      }
+      throw error;
+    }
   }
 
   async exists(key: string): Promise<boolean> {
-    const redis = getRedis();
-    const result = await redis.exists(this.getKey(key));
+    const redis = getRedisOrNull();
+    if (!redis) return false;
+    if (!(await ensureRedisReady(redis))) return false;
+    let result = 0;
+    try {
+      result = await redis.exists(this.getKey(key));
+    } catch (error) {
+      const reason = getRedisDisableReason(error);
+      if (reason) {
+        disableRedis(reason);
+        return false;
+      }
+      throw error;
+    }
     return result === 1;
   }
 
   async ttl(key: string): Promise<number> {
-    const redis = getRedis();
-    return redis.ttl(this.getKey(key));
+    const redis = getRedisOrNull();
+    if (!redis) return -1;
+    if (!(await ensureRedisReady(redis))) return -1;
+    try {
+      return await redis.ttl(this.getKey(key));
+    } catch (error) {
+      const reason = getRedisDisableReason(error);
+      if (reason) {
+        disableRedis(reason);
+        return -1;
+      }
+      throw error;
+    }
   }
 
   async incr(key: string): Promise<number> {
-    const redis = getRedis();
-    return redis.incr(this.getKey(key));
+    const redis = getRedisOrNull();
+    if (!redis) return 0;
+    if (!(await ensureRedisReady(redis))) return 0;
+    try {
+      return await redis.incr(this.getKey(key));
+    } catch (error) {
+      const reason = getRedisDisableReason(error);
+      if (reason) {
+        disableRedis(reason);
+        return 0;
+      }
+      throw error;
+    }
   }
 
   async expire(key: string, ttl: number): Promise<void> {
-    const redis = getRedis();
-    await redis.expire(this.getKey(key), ttl);
+    const redis = getRedisOrNull();
+    if (!redis) return;
+    if (!(await ensureRedisReady(redis))) return;
+    try {
+      await redis.expire(this.getKey(key), ttl);
+    } catch (error) {
+      const reason = getRedisDisableReason(error);
+      if (reason) {
+        disableRedis(reason);
+        return;
+      }
+      throw error;
+    }
   }
 
   async mget<T>(keys: string[]): Promise<(T | null)[]> {
-    const redis = getRedis();
+    const redis = getRedisOrNull();
+    if (!redis) return keys.map(() => null);
+    if (!(await ensureRedisReady(redis))) return keys.map(() => null);
+
     const fullKeys = keys.map((k) => this.getKey(k));
-    const results = await redis.mget(...fullKeys);
+    let results: (string | null)[] = [];
+    try {
+      results = await redis.mget(...fullKeys);
+    } catch (error) {
+      const reason = getRedisDisableReason(error);
+      if (reason) {
+        disableRedis(reason);
+        return keys.map(() => null);
+      }
+      throw error;
+    }
     return results.map((data) => {
       if (!data) return null;
       try {
@@ -96,7 +314,10 @@ export class CacheService {
   }
 
   async mset<T>(entries: Array<{ key: string; value: T; ttl?: number }>): Promise<void> {
-    const redis = getRedis();
+    const redis = getRedisOrNull();
+    if (!redis) return;
+    if (!(await ensureRedisReady(redis))) return;
+
     const pipeline = redis.pipeline();
     for (const { key, value, ttl } of entries) {
       const data = typeof value === 'string' ? value : JSON.stringify(value);
@@ -107,19 +328,50 @@ export class CacheService {
         pipeline.set(fullKey, data);
       }
     }
-    await pipeline.exec();
+    try {
+      await pipeline.exec();
+    } catch (error) {
+      const reason = getRedisDisableReason(error);
+      if (reason) {
+        disableRedis(reason);
+        return;
+      }
+      throw error;
+    }
   }
 
   async keys(pattern: string): Promise<string[]> {
-    const redis = getRedis();
-    return redis.keys(this.getKey(pattern));
+    const redis = getRedisOrNull();
+    if (!redis) return [];
+    if (!(await ensureRedisReady(redis))) return [];
+    try {
+      return await redis.keys(this.getKey(pattern));
+    } catch (error) {
+      const reason = getRedisDisableReason(error);
+      if (reason) {
+        disableRedis(reason);
+        return [];
+      }
+      throw error;
+    }
   }
 
   async flushPattern(pattern: string): Promise<void> {
     const keys = await this.keys(pattern);
     if (keys.length > 0) {
-      const redis = getRedis();
-      await redis.del(...keys);
+      const redis = getRedisOrNull();
+      if (!redis) return;
+      if (!(await ensureRedisReady(redis))) return;
+      try {
+        await redis.del(...keys);
+      } catch (error) {
+        const reason = getRedisDisableReason(error);
+        if (reason) {
+          disableRedis(reason);
+          return;
+        }
+        throw error;
+      }
     }
   }
 }

@@ -1,9 +1,8 @@
 'use client';
 
 import dynamic from 'next/dynamic';
-import { AlertTriangle, CheckCircle2, Copy, RotateCcw, Wrench } from 'lucide-react';
+import { BarChart3, Copy, RotateCcw, Table2, Wrench } from 'lucide-react';
 import { MarkdownContent } from '@/components/chat/MarkdownContent';
-import { summarizeToolInvocation } from '@/lib/agent-workbench';
 import { cn } from '@/lib/utils';
 import {
   extractVisualizationMessage,
@@ -20,7 +19,7 @@ const VisualizationBlock = dynamic(
     ssr: false,
     loading: () => (
       <div className="mt-3 rounded-xl border border-border bg-background/70 p-3 text-sm text-muted-foreground">
-        正在加载图表渲染器...
+        正在加载图表...
       </div>
     ),
   },
@@ -33,10 +32,12 @@ interface Message {
   toolInvocations?: ToolInvocationView[];
 }
 
-function formatToolSummary(result: unknown): string {
-  if (result == null) return '无返回结果';
-  if (typeof result === 'string') return result;
-  return stringifyVisualizationJson(result);
+function buildToolSummary(invocations: ToolInvocationView[]): string {
+  const pendingCount = invocations.filter((item) => item.state === 'calling').length;
+  if (pendingCount > 0) {
+    return `本轮已触发 ${invocations.length} 个工具，${pendingCount} 个仍在执行中`;
+  }
+  return `本轮共执行了 ${invocations.length} 个工具`;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -94,6 +95,10 @@ function ToolResultTable({
 }) {
   return (
     <div className="mt-3 overflow-hidden rounded-xl border border-border/70 bg-background/70">
+      <div className="flex items-center gap-2 border-b border-border/70 px-3 py-2 text-xs font-medium text-muted-foreground">
+        <Table2 className="size-4" aria-hidden />
+        数据表
+      </div>
       <div className="overflow-x-auto">
         <table className="w-full border-collapse text-left text-xs">
           <thead className="bg-muted/40 text-muted-foreground">
@@ -122,83 +127,37 @@ function ToolResultTable({
   );
 }
 
-function ToolInvocationCard({
-  invocation,
-}: {
-  invocation: NonNullable<Message['toolInvocations']>[number];
-}) {
-  const delivery = summarizeToolInvocation(invocation);
-  const result = invocation.result;
-  const visualization = result ? extractVisualizationMessage(result.result) : null;
-  const structuredTable = result ? extractStructuredTable(result.result) : null;
-  const toneClass =
-    delivery.tone === 'success'
-      ? 'border-emerald-500/20 bg-emerald-500/[0.04]'
-      : delivery.tone === 'error'
-        ? 'border-destructive/30 bg-destructive/[0.04]'
-        : 'border-border bg-muted/20';
+function resolvePrimaryDataResult(invocations: ToolInvocationView[]) {
+  for (const invocation of invocations) {
+    const result = invocation.result;
+    if (result?.status !== 'success') {
+      continue;
+    }
+    const visualization = extractVisualizationMessage(result.result);
+    const table = extractStructuredTable(result.result);
+    if (visualization || table) {
+      return {
+        visualization,
+        table,
+        result: result.result,
+      };
+    }
+  }
 
-  return (
-    <div className={cn('rounded-2xl border p-3', toneClass)}>
-      <div className="flex flex-wrap items-start justify-between gap-3">
-        <div className="min-w-0 flex-1">
-          <div className="flex flex-wrap items-center gap-2">
-            <span className="inline-flex items-center gap-1 text-sm font-medium text-foreground">
-              <Wrench className="size-4 opacity-75" />
-              {delivery.title}
-            </span>
-            <span className="rounded-full bg-background/80 px-2 py-0.5 text-[11px] font-medium text-muted-foreground">
-              {delivery.statusLabel}
-            </span>
-          </div>
-          <p className="mt-2 text-sm leading-6 text-foreground">{delivery.summary}</p>
-        </div>
-        {delivery.tone === 'success' ? (
-          <CheckCircle2 className="mt-0.5 size-4 shrink-0 text-emerald-500" />
-        ) : delivery.tone === 'error' ? (
-          <AlertTriangle className="mt-0.5 size-4 shrink-0 text-destructive" />
-        ) : null}
-      </div>
+  return {
+    visualization: null,
+    table: null,
+    result: null,
+  };
+}
 
-      {delivery.highlights.length > 0 ? (
-        <div className="mt-3 flex flex-wrap gap-2">
-          {delivery.highlights.map((item) => (
-            <span
-              key={item}
-              className="rounded-full bg-background/80 px-2.5 py-1 text-[11px] text-muted-foreground"
-            >
-              {item}
-            </span>
-          ))}
-        </div>
-      ) : null}
-
-      {delivery.nextStep ? (
-        <div className="mt-3 rounded-xl bg-background/80 px-3 py-2 text-xs leading-5 text-muted-foreground">
-          下一步建议：{delivery.nextStep}
-        </div>
-      ) : null}
-
-      {result?.status === 'success' && visualization ? (
-        <VisualizationBlock payload={result.result} />
-      ) : null}
-
-      {result?.status === 'success' && structuredTable ? (
-        <ToolResultTable table={structuredTable} />
-      ) : null}
-
-      {invocation.state === 'result' ? (
-        <details className="mt-3 rounded-xl border border-border/70 bg-background/70 p-3">
-          <summary className="cursor-pointer list-none text-xs font-medium text-muted-foreground">
-            查看原始结果
-          </summary>
-          <pre className="mt-2 max-h-72 overflow-auto whitespace-pre-wrap break-words text-xs leading-relaxed text-foreground">
-            {formatToolSummary(result?.result ?? delivery.rawResult)}
-          </pre>
-        </details>
-      ) : null}
-    </div>
-  );
+function extractAnswerMode(value: unknown): string | null {
+  if (!isRecord(value) || !isRecord(value.metadata)) {
+    return null;
+  }
+  return typeof value.metadata.answer_mode === 'string'
+    ? value.metadata.answer_mode
+    : null;
 }
 
 interface ChatMessageProps {
@@ -206,6 +165,8 @@ interface ChatMessageProps {
   onCopyAssistant?: () => void;
   onRegenerate?: () => void;
   regenerateDisabled?: boolean;
+  onOpenToolPanel?: () => void;
+  toolPanelActive?: boolean;
 }
 
 export default function ChatMessage({
@@ -213,11 +174,18 @@ export default function ChatMessage({
   onCopyAssistant,
   onRegenerate,
   regenerateDisabled,
+  onOpenToolPanel,
+  toolPanelActive = false,
 }: ChatMessageProps) {
   const isUser = message.role === 'user';
   const showAssistantActions = !isUser && (onCopyAssistant || onRegenerate);
   const toolInvocations = message.toolInvocations ?? [];
-  const showToolInvocations = !isUser && toolInvocations.length > 0;
+  const showToolSummary = !isUser && toolInvocations.length > 0 && onOpenToolPanel;
+  const primaryDataResult = resolvePrimaryDataResult(toolInvocations);
+  const answerMode = extractAnswerMode(primaryDataResult.result);
+  const showInlineVisualization = !isUser && Boolean(primaryDataResult.visualization);
+  const showInlineTable = !isUser && Boolean(primaryDataResult.table);
+  const renderTableFirst = answerMode != null && ['record_lookup', 'roster', 'detail'].includes(answerMode);
 
   return (
     <div
@@ -240,28 +208,59 @@ export default function ChatMessage({
           </div>
         ) : null}
 
-        {!isUser && (message.content || showAssistantActions || showToolInvocations) ? (
+        {!isUser &&
+        (message.content ||
+          showAssistantActions ||
+          showToolSummary ||
+          showInlineVisualization ||
+          showInlineTable) ? (
           <div className="max-w-3xl py-1 text-[15px] leading-7 text-foreground">
+            {showInlineTable && primaryDataResult.table && renderTableFirst ? (
+              <ToolResultTable table={primaryDataResult.table} />
+            ) : null}
+
+            {showInlineVisualization ? (
+              <div className="mb-3 rounded-2xl border border-border/70 bg-background/70 p-3">
+                <div className="mb-2 flex items-center gap-2 text-xs font-medium text-muted-foreground">
+                  <BarChart3 className="size-4 text-primary" aria-hidden />
+                  图表结果
+                </div>
+                <VisualizationBlock payload={primaryDataResult.result} className="mt-0 border-0 bg-transparent p-0" />
+              </div>
+            ) : null}
+
+            {showInlineTable && primaryDataResult.table && !renderTableFirst ? (
+              <ToolResultTable table={primaryDataResult.table} />
+            ) : null}
+
             {message.content ? (
-              <div className="max-w-none text-[15px] leading-relaxed text-foreground">
+              <div className={cn('max-w-none text-[15px] leading-relaxed text-foreground', (showInlineVisualization || showInlineTable) && 'mt-3')}>
                 <MarkdownContent content={message.content} variant="assistant" />
               </div>
             ) : null}
 
-            {showToolInvocations ? (
-              <div className={cn('mt-3 space-y-2', message.content && 'pt-2')}>
-                <div className="rounded-2xl border border-border/70 bg-background/70 px-4 py-3">
-                  <p className="text-sm font-medium text-foreground">关键操作结果</p>
-                  <p className="mt-1 text-xs leading-5 text-muted-foreground">
-                    下面是本轮回复实际调用过的工具结果。先看摘要，需要时再展开原始数据。
-                  </p>
-                </div>
-                {toolInvocations.map((invocation) => (
-                  <ToolInvocationCard
-                    key={invocation.toolCallId}
-                    invocation={invocation}
-                  />
-                ))}
+            {showToolSummary ? (
+              <div className={cn('mt-3', message.content && 'pt-2')}>
+                <button
+                  type="button"
+                  onClick={onOpenToolPanel}
+                  className={cn(
+                    'inline-flex w-full max-w-[26rem] items-start gap-3 rounded-2xl border px-4 py-3 text-left transition-colors',
+                    toolPanelActive
+                      ? 'border-primary/30 bg-primary/5'
+                      : 'border-border/70 bg-background/80 hover:bg-muted/40',
+                  )}
+                >
+                  <div className="mt-0.5 rounded-full bg-primary/10 p-2 text-primary">
+                    <Wrench className="size-4" />
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <p className="text-sm font-medium text-foreground">查看工具执行详情</p>
+                    <p className="mt-1 text-xs leading-5 text-muted-foreground">
+                      {buildToolSummary(toolInvocations)}
+                    </p>
+                  </div>
+                </button>
               </div>
             ) : null}
 

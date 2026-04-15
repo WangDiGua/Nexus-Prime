@@ -5,7 +5,9 @@
   "scripts": {
     "prisma:generate": "prisma generate",
     "predev": "npm run prisma:generate",
-    "dev": "next dev -p 3001 -H 0.0.0.0",
+    "dev": "next dev --turbopack -p 3001 -H 0.0.0.0",
+    "dev:utf8": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/dev-utf8.ps1",
+    "dev:webpack": "next dev -p 3001 -H 0.0.0.0",
     "prebuild": "npm run prisma:generate",
     "build": "next build",
     "prestart": "npm run prisma:generate",
