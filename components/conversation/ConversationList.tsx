@@ -200,7 +200,10 @@ export default function ConversationList({
         </div>
       )}
 
-      <ScrollArea className="flex-1 min-h-0 px-2">
+      <ScrollArea
+        className="flex-1 min-h-0 px-2"
+        scrollbarClassName="data-vertical:py-3"
+      >
         {isLoading ? (
           <div className="space-y-2 p-2">
             {[1, 2, 3, 4, 5].map((i) => (

@@ -103,6 +103,79 @@ const FALLBACK_ASK_DATA_BUTTON_LABEL =
   process.env.NEXT_PUBLIC_NEXUS_ASK_DATA_BUTTON_LABEL?.trim() || '智能问数';
 const ASK_DATA_DIRECT_ENTRY_ID = 'ask-data-direct-entry';
 const ASK_DATA_DIRECT_ENTRY_TYPE = 'ask_data';
+const AUTO_SCROLL_BOTTOM_THRESHOLD_PX = 96;
+const CHAT_COMPOSER_PREFS_STORAGE_KEY = 'nexus-chat-composer-prefs-v1';
+const DRAFT_CONVERSATION_PREFS_KEY = '__draft__';
+
+interface ChatComposerPreferences {
+  thinkingModeEnabled: boolean;
+  selectedSkill: ChatSelectedSkill | null;
+}
+
+type ChatComposerPreferencesMap = Record<string, ChatComposerPreferences>;
+
+function getComposerPreferencesKey(conversationId: string | null): string {
+  return conversationId ?? DRAFT_CONVERSATION_PREFS_KEY;
+}
+
+function sameSelectedSkill(
+  left: ChatSelectedSkill | null,
+  right: ChatSelectedSkill | null,
+): boolean {
+  if (!left || !right) return false;
+  return (
+    left.id === right.id &&
+    (left.entryResourceType ?? '') === (right.entryResourceType ?? '') &&
+    (left.entryResourceId ?? '') === (right.entryResourceId ?? '')
+  );
+}
+
+function isAskDataSkillSelected(
+  selectedSkill: ChatSelectedSkill | null,
+  askDataShortcutSkill: ChatSelectedSkill | null,
+): boolean {
+  return sameSelectedSkill(selectedSkill, askDataShortcutSkill);
+}
+
+function readComposerPreferencesMap(): ChatComposerPreferencesMap {
+  if (typeof window === 'undefined') return {};
+  try {
+    const raw = window.localStorage.getItem(CHAT_COMPOSER_PREFS_STORAGE_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw) as ChatComposerPreferencesMap;
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function writeComposerPreferencesMap(next: ChatComposerPreferencesMap) {
+  if (typeof window === 'undefined') return;
+  try {
+    window.localStorage.setItem(
+      CHAT_COMPOSER_PREFS_STORAGE_KEY,
+      JSON.stringify(next),
+    );
+  } catch {
+    // Ignore storage failures and keep chat usable.
+  }
+}
+
+function persistComposerPreferences(
+  conversationId: string | null,
+  preferences: ChatComposerPreferences,
+) {
+  const current = readComposerPreferencesMap();
+  current[getComposerPreferencesKey(conversationId)] = preferences;
+  writeComposerPreferencesMap(current);
+}
+
+function loadComposerPreferences(
+  conversationId: string | null,
+): ChatComposerPreferences | null {
+  const current = readComposerPreferencesMap();
+  return current[getComposerPreferencesKey(conversationId)] ?? null;
+}
 
 function parseThinkingStepDurations(raw: unknown): number[] | undefined {
   if (raw == null) return undefined;
@@ -672,9 +745,7 @@ const ChatComposer = React.memo(function ChatComposer({
   isReady: boolean;
 }) {
   const selectedAskDataShortcut = Boolean(
-    askDataShortcutSkill &&
-      selectedSkill?.id === askDataShortcutSkill.id &&
-      selectedSkill.entryResourceId === askDataShortcutSkill.entryResourceId,
+    isAskDataSkillSelected(selectedSkill, askDataShortcutSkill),
   );
   const askDataShortcutActive = Boolean(
     askDataShortcutSkill && selectedAskDataShortcut,
@@ -694,11 +765,19 @@ const ChatComposer = React.memo(function ChatComposer({
       >
         <button
           type="button"
-          onClick={() => setThinkingModeEnabled((v) => !v)}
+          onClick={() => {
+            if (askDataShortcutActive) {
+              setThinkingModeEnabled(true);
+              return;
+            }
+            setThinkingModeEnabled((v) => !v);
+          }}
           disabled={!canChat || isLoading}
           aria-pressed={thinkingModeEnabled}
           title={
-            thinkingModeEnabled
+            askDataShortcutActive
+              ? '智能问数开启时必须启用思考模式'
+              : thinkingModeEnabled
               ? '思考模式已开启：会展示推理过程，响应更慢'
               : '点击开启思考模式（展示推理过程，响应更慢）'
           }
@@ -825,6 +904,7 @@ const ChatMessageList = React.memo(function ChatMessageList({
   activeToolPanelMessageId,
   scrollRef,
   showTypingIndicator,
+  onScroll,
 }: {
   localMessages: Message[];
   regenerateDisabled: boolean;
@@ -836,10 +916,12 @@ const ChatMessageList = React.memo(function ChatMessageList({
   activeToolPanelMessageId: string | null;
   scrollRef: React.RefObject<HTMLDivElement | null>;
   showTypingIndicator: boolean;
+  onScroll: React.UIEventHandler<HTMLDivElement>;
 }) {
   return (
     <div
       ref={scrollRef}
+      onScroll={onScroll}
       className="min-h-0 flex-1 space-y-6 overflow-y-auto scroll-smooth px-3 py-4 sm:px-4 scrollbar-none"
     >
       {localMessages.map((msg) => {
@@ -974,6 +1056,7 @@ export default function NexusChat({
   const [bootstrapLoading, setBootstrapLoading] = useState(true);
 
   const scrollRef = useRef<HTMLDivElement>(null);
+  const autoScrollPinnedRef = useRef(true);
   const skipBootstrapConversationIdRef = useRef<string | null>(null);
 
   const handleModelChange = async (value: string) => {
@@ -1024,6 +1107,28 @@ export default function NexusChat({
   }));
   const [skillSheetOpen, setSkillSheetOpen] = useState(false);
   const [availableSkills, setAvailableSkills] = useState<Skill[]>([]);
+  const composerPreferencesKey = useMemo(
+    () => getComposerPreferencesKey(activeConversationId),
+    [activeConversationId],
+  );
+
+  useLayoutEffect(() => {
+    const savedPreferences = loadComposerPreferences(activeConversationId);
+    if (savedPreferences) {
+      setThinkingModeEnabled(savedPreferences.thinkingModeEnabled);
+      setSelectedSkill(savedPreferences.selectedSkill ?? null);
+      return;
+    }
+    setThinkingModeEnabled(false);
+    setSelectedSkill(null);
+  }, [activeConversationId]);
+
+  useEffect(() => {
+    persistComposerPreferences(activeConversationId, {
+      thinkingModeEnabled,
+      selectedSkill,
+    });
+  }, [activeConversationId, composerPreferencesKey, thinkingModeEnabled, selectedSkill]);
 
   useEffect(() => {
     const shouldLoadSkills =
@@ -1063,6 +1168,16 @@ export default function NexusChat({
   }, [publicSystemConfig, selectedSkill, skillSheetOpen]);
 
   const deferredMessages = useDeferredValue(localMessages);
+  const isScrollNearBottom = useCallback(() => {
+    const container = scrollRef.current;
+    if (!container) return true;
+    const distanceToBottom =
+      container.scrollHeight - container.scrollTop - container.clientHeight;
+    return distanceToBottom <= AUTO_SCROLL_BOTTOM_THRESHOLD_PX;
+  }, []);
+  const handleMessageListScroll = useCallback(() => {
+    autoScrollPinnedRef.current = isScrollNearBottom();
+  }, [isScrollNearBottom]);
   const activeToolMessage = useMemo(
     () =>
       localMessages.find(
@@ -1098,6 +1213,18 @@ export default function NexusChat({
       entryResourceId: publicSystemConfig.askDataSkillId,
     };
   }, [availableSkills, publicSystemConfig]);
+  const askDataShortcutActive = useMemo(
+    () => isAskDataSkillSelected(selectedSkill, askDataShortcutSkill),
+    [selectedSkill, askDataShortcutSkill],
+  );
+  const effectiveThinkingModeEnabled =
+    thinkingModeEnabled || askDataShortcutActive;
+
+  useEffect(() => {
+    if (askDataShortcutActive && !thinkingModeEnabled) {
+      setThinkingModeEnabled(true);
+    }
+  }, [askDataShortcutActive, thinkingModeEnabled]);
 
   /**
    * Bootstrap is the only source for first-load conversation hydration.
@@ -1199,6 +1326,9 @@ export default function NexusChat({
   }, []);
 
   useLayoutEffect(() => {
+    if (!autoScrollPinnedRef.current) {
+      return;
+    }
     let frameA = 0;
     let frameB = 0;
 
@@ -1213,7 +1343,11 @@ export default function NexusChat({
       window.cancelAnimationFrame(frameA);
       window.cancelAnimationFrame(frameB);
     };
-  }, [localMessages, isLoading, scrollToLatestMessage]);
+  }, [deferredMessages, isLoading, scrollToLatestMessage]);
+
+  useEffect(() => {
+    autoScrollPinnedRef.current = true;
+  }, [activeConversationId]);
 
   useEffect(() => {
     if (!activeToolMessage && toolPanelOpen) {
@@ -1284,14 +1418,12 @@ export default function NexusChat({
 
   const handleSelectAskDataShortcut = useCallback(() => {
     if (askDataShortcutSkill) {
-      setSelectedSkill((current) =>
-        current?.id === askDataShortcutSkill.id &&
-        current.entryResourceId === askDataShortcutSkill.entryResourceId
-          ? null
-          : askDataShortcutSkill,
-      );
+      if (!askDataShortcutActive) {
+        setThinkingModeEnabled(true);
+      }
+      setSelectedSkill(askDataShortcutActive ? null : askDataShortcutSkill);
     }
-  }, [askDataShortcutSkill]);
+  }, [askDataShortcutActive, askDataShortcutSkill]);
 
   const runAssistantStream = useCallback(
     async (params: {
@@ -1728,7 +1860,7 @@ export default function NexusChat({
         apiMessages,
         conversationId: activeConversationId,
         controller,
-        enableThinking: thinkingModeEnabled,
+        enableThinking: effectiveThinkingModeEnabled,
         entrySkill: selectedSkill,
       });
     },
@@ -1739,7 +1871,7 @@ export default function NexusChat({
       localMessages,
       activeConversationId,
       runAssistantStream,
-      thinkingModeEnabled,
+      effectiveThinkingModeEnabled,
       selectedSkill,
     ],
   );
@@ -1758,6 +1890,7 @@ export default function NexusChat({
       content: input,
     };
     const assistantMessageId = Math.random().toString(36).substring(7);
+    autoScrollPinnedRef.current = true;
     setStreamingAssistantId(assistantMessageId);
 
     setLocalMessages((prev) => [
@@ -1789,6 +1922,10 @@ export default function NexusChat({
         if (createResponse.ok) {
           const conversation = await createResponse.json();
           currentConversationId = conversation.id;
+          persistComposerPreferences(currentConversationId, {
+            thinkingModeEnabled: effectiveThinkingModeEnabled,
+            selectedSkill,
+          });
           skipBootstrapConversationIdRef.current = currentConversationId;
           onSelectConversation(currentConversationId);
           bumpConversationList();
@@ -1821,7 +1958,7 @@ export default function NexusChat({
       ],
       conversationId: currentConversationId,
       controller,
-      enableThinking: thinkingModeEnabled,
+      enableThinking: effectiveThinkingModeEnabled,
       entrySkill: selectedSkill,
     });
   };
@@ -1871,7 +2008,7 @@ export default function NexusChat({
                 handleSubmit={handleSubmit}
                 canChat={canChat}
                 isLoading={isLoading}
-                thinkingModeEnabled={thinkingModeEnabled}
+                thinkingModeEnabled={effectiveThinkingModeEnabled}
                 askDataShortcutSkill={askDataShortcutSkill}
                 onSelectAskDataShortcut={handleSelectAskDataShortcut}
                 setThinkingModeEnabled={setThinkingModeEnabled}
@@ -1892,20 +2029,21 @@ export default function NexusChat({
               localMessages={deferredMessages}
               regenerateDisabled={isLoading}
               streamingAssistantId={streamingAssistantId}
-              thinkingModeEnabled={thinkingModeEnabled}
+              thinkingModeEnabled={effectiveThinkingModeEnabled}
               handleCopyAssistant={handleCopyAssistant}
               handleRegenerateAssistant={handleRegenerateAssistant}
               openToolPanelForMessage={openToolPanelForMessage}
               activeToolPanelMessageId={toolPanelOpen ? toolPanelMessageId : null}
               scrollRef={scrollRef}
               showTypingIndicator={showTypingIndicator}
+              onScroll={handleMessageListScroll}
             />
             <div className="shrink-0 px-3 pt-2 sm:px-4 pb-safe-composer">
               <ChatComposer
                 handleSubmit={handleSubmit}
                 canChat={canChat}
                 isLoading={isLoading}
-                thinkingModeEnabled={thinkingModeEnabled}
+                thinkingModeEnabled={effectiveThinkingModeEnabled}
                 askDataShortcutSkill={askDataShortcutSkill}
                 onSelectAskDataShortcut={handleSelectAskDataShortcut}
                 setThinkingModeEnabled={setThinkingModeEnabled}
