@@ -79,8 +79,8 @@ export interface AggregatedToolsResponse {
   warnings?: string[];
 }
 
-function getDirectAskDataSseUrl(): string | null {
-  const value = process.env.NEXUS_ASK_DATA_MCP_SSE_URL?.trim();
+function getDirectAskDataMcpUrl(): string | null {
+  const value = process.env.NEXUS_ASK_DATA_MCP_URL?.trim();
   return value ? value : null;
 }
 
@@ -216,18 +216,18 @@ export class LantuClient {
   }
 
   private async fetchAggregatedToolsFromDirectAskData(): Promise<AggregatedToolsResponse> {
-    const sseUrl = getDirectAskDataSseUrl();
-    if (!sseUrl) {
+    const mcpUrl = getDirectAskDataMcpUrl();
+    if (!mcpUrl) {
       return {
         tools: [],
         routes: [],
-        warnings: ['NEXUS_ASK_DATA_MCP_SSE_URL is not configured'],
+        warnings: ['NEXUS_ASK_DATA_MCP_URL is not configured'],
       };
     }
 
     try {
       const toolsList = await fetchDirectMcpTools(
-        sseUrl,
+        mcpUrl,
         getDirectAskDataTimeoutMs(),
       );
       const tools: LantuTool[] = toolsList.map((tool) => ({
@@ -513,12 +513,12 @@ export class LantuClient {
 
   private async invokeDirectAskData(request: InvokeRequest): Promise<InvokeResponse> {
     const startTime = Date.now();
-    const sseUrl = getDirectAskDataSseUrl();
+    const mcpUrl = getDirectAskDataMcpUrl();
 
-    if (!sseUrl) {
+    if (!mcpUrl) {
       return {
         success: false,
-        error: 'NEXUS_ASK_DATA_MCP_SSE_URL is not configured',
+        error: 'NEXUS_ASK_DATA_MCP_URL is not configured',
         latency: Date.now() - startTime,
       };
     }
@@ -535,7 +535,7 @@ export class LantuClient {
       }
 
       const data = await callDirectMcpTool(
-        sseUrl,
+        mcpUrl,
         getDirectAskDataTimeoutMs(),
         payload.name,
         payload.arguments || {},

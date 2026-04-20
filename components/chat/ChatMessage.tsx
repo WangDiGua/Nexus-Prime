@@ -44,17 +44,28 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 }
 
+function unwrapToolPayload(value: unknown): Record<string, unknown> | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+  if (isRecord(value.payload)) {
+    return value.payload;
+  }
+  return value;
+}
+
 function extractStructuredTable(value: unknown): {
   columns: Array<{ key: string; label: string }>;
   rows: Record<string, unknown>[];
 } | null {
-  if (!isRecord(value) || !('table' in value) || !isRecord(value.table)) {
+  const payload = unwrapToolPayload(value);
+  if (!payload || !('table' in payload) || !isRecord(payload.table)) {
     return null;
   }
 
-  const rawColumns = Array.isArray(value.table.columns) ? value.table.columns : [];
-  const rows = Array.isArray(value.table.rows)
-    ? value.table.rows.filter(isRecord)
+  const rawColumns = Array.isArray(payload.table.columns) ? payload.table.columns : [];
+  const rows = Array.isArray(payload.table.rows)
+    ? payload.table.rows.filter(isRecord)
     : [];
   if (rawColumns.length === 0 || rows.length === 0) {
     return null;
@@ -133,13 +144,14 @@ function resolvePrimaryDataResult(invocations: ToolInvocationView[]) {
     if (result?.status !== 'success') {
       continue;
     }
-    const visualization = extractVisualizationMessage(result.result);
-    const table = extractStructuredTable(result.result);
+    const normalizedResult = unwrapToolPayload(result.result) ?? result.result;
+    const visualization = extractVisualizationMessage(normalizedResult);
+    const table = extractStructuredTable(normalizedResult);
     if (visualization || table) {
       return {
         visualization,
         table,
-        result: result.result,
+        result: normalizedResult,
       };
     }
   }
@@ -152,11 +164,12 @@ function resolvePrimaryDataResult(invocations: ToolInvocationView[]) {
 }
 
 function extractAnswerMode(value: unknown): string | null {
-  if (!isRecord(value) || !isRecord(value.metadata)) {
+  const payload = unwrapToolPayload(value);
+  if (!payload || !isRecord(payload.metadata)) {
     return null;
   }
-  return typeof value.metadata.answer_mode === 'string'
-    ? value.metadata.answer_mode
+  return typeof payload.metadata.answer_mode === 'string'
+    ? payload.metadata.answer_mode
     : null;
 }
 

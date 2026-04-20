@@ -33,6 +33,16 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 }
 
+function unwrapAskDataPayload(value: unknown): Record<string, unknown> | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+  if (isRecord(value.payload)) {
+    return value.payload;
+  }
+  return value;
+}
+
 function getLatestUserMessage(
   messages: Array<{ role: string; content: string }>,
 ): string | null {
@@ -43,6 +53,15 @@ function getLatestUserMessage(
     }
   }
   return null;
+}
+
+const ASK_DATA_TOOL_NAME_HINTS = ['mcp_query_v2'] as const;
+
+function isAskDataToolName(name: string | undefined | null): boolean {
+  if (!name) {
+    return false;
+  }
+  return ASK_DATA_TOOL_NAME_HINTS.some((hint) => name.includes(hint));
 }
 
 const ASK_DATA_IDENTIFIER_PATTERN =
@@ -127,23 +146,35 @@ function buildForcedAskDataContent(result: ToolResult): string {
     return `本次问数执行失败：${result.error || '未知错误'}`;
   }
 
-  if (!isRecord(result.result)) {
+  const payload = unwrapAskDataPayload(result.result);
+  if (!payload) {
     return '已完成问数查询，请查看返回结果。';
   }
 
-  const payload = result.result;
-  const clarificationRequired = payload.clarification_required === true;
+  const clarification = isRecord(payload.clarification) ? payload.clarification : null;
+  const answer = isRecord(payload.answer) ? payload.answer : null;
+  const clarificationRequired = clarification?.required === true;
   const clarificationQuestion =
-    typeof payload.clarification_question === 'string'
-      ? payload.clarification_question.trim()
+    typeof clarification?.question === 'string'
+      ? clarification.question.trim()
       : '';
+  const answerSummary =
+    typeof answer?.summary === 'string' ? answer.summary.trim() : '';
+  const answerDetails =
+    typeof answer?.details === 'string' ? answer.details.trim() : '';
   const text = typeof payload.text === 'string' ? payload.text.trim() : '';
 
   if (clarificationRequired && clarificationQuestion) {
     return clarificationQuestion;
   }
+  if (answerSummary) {
+    return answerDetails ? `${answerSummary}\n\n${answerDetails}` : answerSummary;
+  }
   if (text) {
     return text;
+  }
+  if (payload.executed === false && typeof payload.sql === 'string' && payload.sql.trim()) {
+    return `已生成查询方案，但当前未返回执行结果。\n\nSQL:\n${payload.sql.trim()}`;
   }
   return '已完成问数查询，请查看图表或表格结果。';
 }
@@ -733,15 +764,20 @@ export async function POST(req: NextRequest) {
       );
       const tools = toolExecutor.getToolDefinitions();
       const hasAskDataTool = tools.some((tool) =>
-        tool.function.name.includes('ask_data_query'),
+        isAskDataToolName(tool.function.name),
       );
       const forcedAskDataMode =
         body.entryResourceType === 'ask_data' && hasAskDataTool;
       const latestUserQuery = buildForcedAskDataQuery(userMessages);
+      const askDataDatabase =
+        (await systemSettingsService.getRawValue('NDEA_MYSQL_DATABASE'))?.trim() ||
+        process.env.NDEA_MYSQL_DATABASE?.trim() ||
+        process.env.MYSQL_DATABASE?.trim() ||
+        undefined;
 
       if (forcedAskDataMode && latestUserQuery) {
         const askDataTool = tools.find((tool) =>
-          tool.function.name.includes('ask_data_query'),
+          isAskDataToolName(tool.function.name),
         );
 
         if (askDataTool) {
@@ -750,6 +786,7 @@ export async function POST(req: NextRequest) {
             name: askDataTool.function.name,
             args: {
               query_text: latestUserQuery,
+              ...(askDataDatabase ? { database: askDataDatabase } : {}),
             },
           };
 
@@ -859,7 +896,7 @@ export async function POST(req: NextRequest) {
 
 ## Data Query Priority
 
-When the user asks for campus business data, grouped statistics, rankings, trends, rosters, or identifier-based attribute lookup, prefer the ask_data_query tool.
+When the user asks for campus business data, grouped statistics, rankings, trends, rosters, or identifier-based attribute lookup, prefer the mcp_query_v2 tool.
 - Do not guess numbers, factual records, or attribute values from memory.
 - If the tool returns a table, chart, or clarification question, use that result directly.
 - If a chart is available, summarize the answer instead of rewriting the full dataset row by row.
@@ -876,7 +913,7 @@ When the user asks for campus business data, grouped statistics, rankings, trend
 
 The user explicitly entered 智能问数 mode.
 - Treat this conversation as a campus data query workflow first.
-- Prefer asking the ask_data_query tool for factual data, statistics, dimensions, trends, rosters, and identifier-based lookups.
+- Prefer asking the mcp_query_v2 tool for factual data, statistics, dimensions, trends, rosters, and identifier-based lookups.
 - Keep answers grounded in tool output instead of general speculation.
 - When chart data is available, keep the written answer brief and insight-focused.
 `

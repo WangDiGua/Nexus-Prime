@@ -35,17 +35,28 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 }
 
+function unwrapToolPayload(value: unknown): Record<string, unknown> | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+  if (isRecord(value.payload)) {
+    return value.payload;
+  }
+  return value;
+}
+
 function extractStructuredTable(value: unknown): {
   columns: Array<{ key: string; label: string }>;
   rows: Record<string, unknown>[];
 } | null {
-  if (!isRecord(value) || !('table' in value) || !isRecord(value.table)) {
+  const payload = unwrapToolPayload(value);
+  if (!payload || !('table' in payload) || !isRecord(payload.table)) {
     return null;
   }
 
-  const rawColumns = Array.isArray(value.table.columns) ? value.table.columns : [];
-  const rows = Array.isArray(value.table.rows)
-    ? value.table.rows.filter(isRecord)
+  const rawColumns = Array.isArray(payload.table.columns) ? payload.table.columns : [];
+  const rows = Array.isArray(payload.table.rows)
+    ? payload.table.rows.filter(isRecord)
     : [];
   if (rawColumns.length === 0 || rows.length === 0) {
     return null;
@@ -70,6 +81,41 @@ function extractStructuredTable(value: unknown): {
     .filter(Boolean) as Array<{ key: string; label: string }>;
 
   return columns.length > 0 ? { columns, rows } : null;
+}
+
+function extractToolTrace(value: unknown): string[] {
+  const payload = unwrapToolPayload(value);
+  return Array.isArray(payload?.tool_trace)
+    ? payload.tool_trace.filter(
+        (item): item is string => typeof item === 'string' && item.trim().length > 0,
+      )
+    : [];
+}
+
+function extractSqlText(value: unknown): string | null {
+  const payload = unwrapToolPayload(value);
+  return typeof payload?.sql === 'string' && payload.sql.trim().length > 0
+    ? payload.sql.trim()
+    : null;
+}
+
+function extractAnswerSummary(value: unknown): string | null {
+  const payload = unwrapToolPayload(value);
+  const answer = payload && isRecord(payload.answer) ? payload.answer : null;
+  return typeof answer?.summary === 'string' && answer.summary.trim().length > 0
+    ? answer.summary.trim()
+    : null;
+}
+
+function extractClarificationQuestion(value: unknown): string | null {
+  const payload = unwrapToolPayload(value);
+  const clarification =
+    payload && isRecord(payload.clarification) ? payload.clarification : null;
+  return clarification?.required === true &&
+    typeof clarification.question === 'string' &&
+    clarification.question.trim().length > 0
+    ? clarification.question.trim()
+    : null;
 }
 
 function renderTableCell(value: unknown): string {
@@ -121,8 +167,21 @@ function ToolInvocationCard({
 }) {
   const delivery = summarizeToolInvocation(invocation);
   const result = invocation.result;
-  const visualization = result ? extractVisualizationMessage(result.result) : null;
-  const structuredTable = result ? extractStructuredTable(result.result) : null;
+  const normalizedResult = result ? unwrapToolPayload(result.result) ?? result.result : null;
+  const visualization = normalizedResult
+    ? extractVisualizationMessage(normalizedResult)
+    : null;
+  const structuredTable = normalizedResult
+    ? extractStructuredTable(normalizedResult)
+    : null;
+  const toolTrace = normalizedResult ? extractToolTrace(normalizedResult) : [];
+  const sqlText = normalizedResult ? extractSqlText(normalizedResult) : null;
+  const answerSummary = normalizedResult
+    ? extractAnswerSummary(normalizedResult)
+    : null;
+  const clarificationQuestion = normalizedResult
+    ? extractClarificationQuestion(normalizedResult)
+    : null;
   const toneClass =
     delivery.tone === 'success'
       ? 'border-emerald-500/20 bg-emerald-500/[0.04]'
@@ -171,8 +230,47 @@ function ToolInvocationCard({
         </div>
       ) : null}
 
+      {answerSummary ? (
+        <div className="mt-3 rounded-xl bg-background/80 px-3 py-2 text-xs leading-5 text-foreground">
+          回答摘要：{answerSummary}
+        </div>
+      ) : null}
+
+      {clarificationQuestion ? (
+        <div className="mt-3 rounded-xl border border-amber-500/30 bg-amber-500/[0.06] px-3 py-2 text-xs leading-5 text-foreground">
+          待澄清：{clarificationQuestion}
+        </div>
+      ) : null}
+
+      {toolTrace.length > 0 ? (
+        <div className="mt-3 rounded-xl border border-border/70 bg-background/70 px-3 py-3">
+          <p className="text-xs font-medium text-muted-foreground">执行步骤</p>
+          <div className="mt-2 flex flex-wrap gap-2">
+            {toolTrace.map((step, index) => (
+              <span
+                key={`${step}-${index}`}
+                className="rounded-full bg-muted px-2.5 py-1 text-[11px] text-foreground"
+              >
+                {index + 1}. {step}
+              </span>
+            ))}
+          </div>
+        </div>
+      ) : null}
+
+      {sqlText ? (
+        <details className="mt-3 rounded-xl border border-border/70 bg-background/70 p-3">
+          <summary className="cursor-pointer list-none text-xs font-medium text-muted-foreground">
+            查看 SQL
+          </summary>
+          <pre className="mt-2 overflow-auto whitespace-pre-wrap break-words text-xs leading-relaxed text-foreground">
+            {sqlText}
+          </pre>
+        </details>
+      ) : null}
+
       {result?.status === 'success' && visualization ? (
-        <VisualizationBlock payload={result.result} />
+        <VisualizationBlock payload={normalizedResult} />
       ) : null}
 
       {result?.status === 'success' && structuredTable ? (
@@ -185,7 +283,7 @@ function ToolInvocationCard({
             查看原始结果
           </summary>
           <pre className="mt-2 max-h-72 overflow-auto whitespace-pre-wrap break-words text-xs leading-relaxed text-foreground">
-            {formatToolSummary(result?.result ?? delivery.rawResult)}
+            {formatToolSummary(normalizedResult ?? result?.result ?? delivery.rawResult)}
           </pre>
         </details>
       ) : null}

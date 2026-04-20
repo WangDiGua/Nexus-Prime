@@ -2,6 +2,8 @@ import type { LantuTool } from './lantu-client';
 import { ToolCall, ToolResult } from '@/types/chat';
 import { getLantuClient } from '@/lib/runtime/lazy-services';
 
+const ASK_DATA_TOOL_NAMES = new Set(['mcp_query_v2']);
+
 function cleanMarkdownFormatting(value: unknown): unknown {
   if (typeof value === 'string') {
     let cleaned = value;
@@ -174,7 +176,7 @@ export class ToolExecutor {
     }
 
     const originalToolName = toolCall.name.replace(/^mcp_\d+_/, '');
-    if (originalToolName !== 'ask_data_query') {
+    if (!ASK_DATA_TOOL_NAMES.has(originalToolName)) {
       return cleanedArgs;
     }
 

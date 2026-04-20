@@ -22,10 +22,6 @@ interface McpToolDefinition {
   inputSchema?: object;
 }
 
-function resolveUrl(baseUrl: string, value: string): string {
-  return new URL(value, baseUrl).toString();
-}
-
 function parseSseEvent(rawEvent: string): SseEventPayload {
   const lines = rawEvent.split('\n');
   let eventName: string | undefined;
@@ -50,58 +46,41 @@ function parseSseEvent(rawEvent: string): SseEventPayload {
   };
 }
 
+function normalizeEventStream(raw: string): string {
+  return raw.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+}
+
+function parseJsonRpcMessage(raw: string): JsonRpcMessage | null {
+  try {
+    return JSON.parse(raw) as JsonRpcMessage;
+  } catch {
+    return null;
+  }
+}
+
+function parseEventStreamMessages(raw: string): JsonRpcMessage[] {
+  const messages: JsonRpcMessage[] = [];
+  const normalized = normalizeEventStream(raw);
+  const events = normalized.split('\n\n');
+
+  for (const rawEvent of events) {
+    const event = parseSseEvent(rawEvent);
+    if (!event.data) {
+      continue;
+    }
+    const message = parseJsonRpcMessage(event.data);
+    if (message) {
+      messages.push(message);
+    }
+  }
+
+  return messages;
+}
+
 class DirectMcpSession {
-  private decoder = new TextDecoder();
-  private buffer = '';
+  private sessionId: string | null = null;
 
-  constructor(
-    private readonly reader: ReadableStreamDefaultReader<Uint8Array>,
-    readonly messagesUrl: string,
-    private readonly abortController: AbortController,
-    initialBuffer = '',
-  ) {
-    this.buffer = initialBuffer;
-  }
-
-  static async connect(
-    sseUrl: string,
-    timeoutMs: number,
-  ): Promise<DirectMcpSession> {
-    const abortController = new AbortController();
-    const response = await fetch(sseUrl, {
-      method: 'GET',
-      headers: {
-        Accept: 'text/event-stream',
-      },
-      cache: 'no-store',
-      signal: abortController.signal,
-    });
-
-    if (!response.ok || !response.body) {
-      abortController.abort();
-      throw new Error(
-        `Failed to open direct MCP SSE (${response.status} ${response.statusText})`,
-      );
-    }
-
-    const session = new DirectMcpSession(
-      response.body.getReader(),
-      sseUrl,
-      abortController,
-    );
-
-    while (true) {
-      const event = await session.readEvent(timeoutMs);
-      if (event.event === 'endpoint' && event.data) {
-        return new DirectMcpSession(
-          session.reader,
-          resolveUrl(sseUrl, event.data),
-          abortController,
-          session.buffer,
-        );
-      }
-    }
-  }
+  constructor(private readonly endpointUrl: string) {}
 
   async initialize(timeoutMs: number): Promise<void> {
     await this.request(
@@ -121,10 +100,13 @@ class DirectMcpSession {
       timeoutMs,
     );
 
-    await this.send({
-      jsonrpc: '2.0',
-      method: 'notifications/initialized',
-    });
+    await this.post(
+      {
+        jsonrpc: '2.0',
+        method: 'notifications/initialized',
+      },
+      timeoutMs,
+    );
   }
 
   async request<T = unknown>(
@@ -135,99 +117,86 @@ class DirectMcpSession {
       throw new Error('Direct MCP request requires an id');
     }
 
-    await this.send(payload);
+    const messages = await this.post(payload, timeoutMs);
+    const match = messages.find((message) => message.id === payload.id);
 
-    while (true) {
-      const event = await this.readEvent(timeoutMs);
-      if (!event.data) {
-        continue;
-      }
-
-      let message: JsonRpcMessage;
-      try {
-        message = JSON.parse(event.data) as JsonRpcMessage;
-      } catch {
-        continue;
-      }
-
-      if (message.id !== payload.id) {
-        continue;
-      }
-
-      if (message.error) {
-        throw new Error(message.error.message || 'Direct MCP request failed');
-      }
-
-      return message.result as T;
+    if (!match) {
+      throw new Error('Direct MCP response did not include the expected message');
     }
+    if (match.error) {
+      throw new Error(match.error.message || 'Direct MCP request failed');
+    }
+
+    return match.result as T;
   }
 
   close(): void {
-    this.abortController.abort();
-    this.reader.releaseLock();
+    // FastMCP HTTP transport is request/response based.
   }
 
-  private async send(payload: JsonRpcMessage): Promise<void> {
-    const response = await fetch(this.messagesUrl, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      cache: 'no-store',
-      body: JSON.stringify(payload),
-    });
+  private async post(
+    payload: JsonRpcMessage,
+    timeoutMs: number,
+  ): Promise<JsonRpcMessage[]> {
+    const abortController = new AbortController();
+    const timer = setTimeout(() => abortController.abort(), timeoutMs);
 
-    if (!response.ok) {
-      const detail = await response.text().catch(() => '');
-      throw new Error(
-        `Direct MCP POST failed (${response.status} ${response.statusText}): ${detail.slice(0, 200)}`,
-      );
-    }
-  }
+    try {
+      const response = await fetch(this.endpointUrl, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Accept: 'application/json, text/event-stream',
+          ...(this.sessionId ? { 'Mcp-Session-Id': this.sessionId } : {}),
+        },
+        cache: 'no-store',
+        body: JSON.stringify(payload),
+        signal: abortController.signal,
+      });
 
-  private async readEvent(timeoutMs: number): Promise<SseEventPayload> {
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const event = await Promise.race([
-      this.readEventInternal(),
-      new Promise<never>((_, reject) => {
-        timer = setTimeout(() => {
-          reject(new Error('Direct MCP SSE read timeout'));
-        }, timeoutMs);
-      }),
-    ]);
-    if (timer) {
+      if (!response.ok) {
+        const detail = await response.text().catch(() => '');
+        throw new Error(
+          `Direct MCP HTTP failed (${response.status} ${response.statusText}): ${detail.slice(0, 200)}`,
+        );
+      }
+
+      const responseSessionId =
+        response.headers.get('mcp-session-id') ??
+        response.headers.get('Mcp-Session-Id');
+      if (responseSessionId) {
+        this.sessionId = responseSessionId;
+      }
+
+      const body = await response.text();
+      if (!body.trim()) {
+        return [];
+      }
+
+      const contentType = response.headers.get('content-type') || '';
+      if (contentType.includes('text/event-stream')) {
+        return parseEventStreamMessages(body);
+      }
+
+      const message = parseJsonRpcMessage(body);
+      if (message) {
+        return [message];
+      }
+
+      throw new Error('Direct MCP HTTP returned an unreadable response body');
+    } finally {
       clearTimeout(timer);
     }
-
-    return event;
   }
+}
 
-  private async readEventInternal(): Promise<SseEventPayload> {
-    while (true) {
-      const normalizedBuffer = this.buffer
-        .replace(/\r\n/g, '\n')
-        .replace(/\r/g, '\n');
-      const separatorIndex = normalizedBuffer.indexOf('\n\n');
-
-      if (separatorIndex >= 0) {
-        const rawEvent = normalizedBuffer.slice(0, separatorIndex);
-        this.buffer = normalizedBuffer.slice(separatorIndex + 2);
-        return parseSseEvent(rawEvent);
-      }
-
-      const { done, value } = await this.reader.read();
-      if (done) {
-        if (normalizedBuffer.trim()) {
-          this.buffer = '';
-          return parseSseEvent(normalizedBuffer);
-        }
-        throw new Error('Direct MCP SSE stream closed');
-      }
-
-      this.buffer =
-        normalizedBuffer + this.decoder.decode(value ?? new Uint8Array(), { stream: true });
-    }
-  }
+function normalizeDirectMcpUrl(baseUrl: string): string {
+  const url = new URL(baseUrl);
+  const pathname = url.pathname.replace(/\/+$/, '');
+  url.pathname = pathname === '' ? '/mcp/' : `${pathname}/`;
+  url.search = '';
+  url.hash = '';
+  return url.toString();
 }
 
 function extractStructuredToolResult(result: unknown): unknown {
@@ -259,11 +228,11 @@ function extractStructuredToolResult(result: unknown): unknown {
 }
 
 async function withDirectMcpSession<T>(
-  sseUrl: string,
+  baseUrl: string,
   timeoutMs: number,
   run: (session: DirectMcpSession) => Promise<T>,
 ): Promise<T> {
-  const session = await DirectMcpSession.connect(sseUrl, timeoutMs);
+  const session = new DirectMcpSession(normalizeDirectMcpUrl(baseUrl));
   try {
     await session.initialize(timeoutMs);
     return await run(session);
@@ -273,10 +242,10 @@ async function withDirectMcpSession<T>(
 }
 
 export async function fetchDirectMcpTools(
-  sseUrl: string,
+  baseUrl: string,
   timeoutMs: number,
 ): Promise<McpToolDefinition[]> {
-  return withDirectMcpSession(sseUrl, timeoutMs, async (session) => {
+  return withDirectMcpSession(baseUrl, timeoutMs, async (session) => {
     const result = await session.request<{ tools?: McpToolDefinition[] }>(
       {
         jsonrpc: '2.0',
@@ -291,12 +260,12 @@ export async function fetchDirectMcpTools(
 }
 
 export async function callDirectMcpTool(
-  sseUrl: string,
+  baseUrl: string,
   timeoutMs: number,
   toolName: string,
   args: Record<string, unknown>,
 ): Promise<unknown> {
-  return withDirectMcpSession(sseUrl, timeoutMs, async (session) => {
+  return withDirectMcpSession(baseUrl, timeoutMs, async (session) => {
     const result = await session.request(
       {
         jsonrpc: '2.0',
